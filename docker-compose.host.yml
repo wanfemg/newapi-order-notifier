@@ -1,5 +1,7 @@
 # 覆盖层：new-api 容器使用 host 网络时，本服务同样使用 host 网络
-# 此时界面端口由 UI_BIND_PORT 直接决定（默认 8765），数据库地址沿用宿主机地址
+# 此时界面端口由 UI_BIND_PORT 直接决定（默认 8765），监听地址由 UI_BIND 决定
+# （deploy.sh 会把它设成 UI_BIND_ADDR，默认 127.0.0.1，只对本机开放）
+# 数据库地址沿用宿主机地址
 services:
   order-notifier:
     network_mode: host

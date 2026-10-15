@@ -15,7 +15,7 @@ services:
       - "${NEWAPI_DATA_HOST:-./data/newapi-data}:/newapi-data:ro"
     environment:
       DATA_DIR: /data
-      UI_BIND: 0.0.0.0
+      UI_BIND: "${UI_BIND:-0.0.0.0}"
       UI_PORT: "${UI_BIND_PORT:-8080}"
       UI_PASSWORD: "${UI_PASSWORD:?run deploy.sh or create .env first}"
       SQL_DSN: "${SQL_DSN:-}"

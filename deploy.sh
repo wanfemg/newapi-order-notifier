@@ -182,6 +182,14 @@ fi
 
 # ---------- 4. 生成口令并写出 .env ----------
 
+# 界面绑定地址：默认只绑本机（127.0.0.1），不对外暴露公网
+# 需要从别的机器访问时改成内网地址（如 192.168.1.10）；0.0.0.0 表示对外全开，请自行确保安全组/反代已限制来源
+UI_BIND_ADDR=""
+if [[ -f .env ]]; then
+  UI_BIND_ADDR=$(grep -E '^UI_BIND_ADDR=' .env 2>/dev/null | head -n1 | cut -d'=' -f2- || true)
+fi
+[[ -n "$UI_BIND_ADDR" ]] || UI_BIND_ADDR="127.0.0.1"
+
 UI_PASSWORD=""
 if [[ -f .env ]]; then
   UI_PASSWORD=$(grep -E '^UI_PASSWORD=' .env 2>/dev/null | head -n1 | cut -d'=' -f2- || true)
@@ -208,6 +216,11 @@ fi
   printf 'UI_PASSWORD=%s\n' "$UI_PASSWORD"
   printf 'UI_BIND_PORT=%s\n' "$UI_BIND_PORT"
   printf 'UI_PUBLISH_PORT=8765\n'
+  printf 'UI_BIND_ADDR=%s\n' "$UI_BIND_ADDR"
+  # host 模式没有端口发布，容器直接监听在宿主机的这个地址上
+  if [[ "$OVERLAY" == "host" ]]; then
+    printf 'UI_BIND=%s\n' "$UI_BIND_ADDR"
+  fi
   printf 'POLL_INTERVAL=10s\n'
   printf 'APP_VERSION=%s\n' "$VERSION"
   printf 'TZ=Asia/Shanghai\n'
@@ -223,10 +236,22 @@ $DOCKER_COMPOSE up -d --build
 
 HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 [[ -n "$HOST_IP" ]] || HOST_IP="<服务器IP>"
-if [[ "$OVERLAY" == "host" ]]; then
-  ACCESS_URL="http://${HOST_IP}:${UI_BIND_PORT}"
+
+PORT=$UI_BIND_PORT
+if [[ "$OVERLAY" == "bridge" ]]; then
+  PORT=8765
+fi
+
+# 默认只绑本机，所以给出 SSH 隧道用法：不必为了打开界面而把端口暴露到公网
+if [[ "$UI_BIND_ADDR" == "127.0.0.1" || "$UI_BIND_ADDR" == "localhost" ]]; then
+  ACCESS_URL="http://127.0.0.1:${PORT}（仅本机）"
+  TUNNEL_HINT="ssh -L ${PORT}:127.0.0.1:${PORT} $(whoami)@${HOST_IP}"
+elif [[ "$UI_BIND_ADDR" == "0.0.0.0" || "$UI_BIND_ADDR" == "*" ]]; then
+  ACCESS_URL="http://${HOST_IP}:${PORT}"
+  TUNNEL_HINT=""
 else
-  ACCESS_URL="http://${HOST_IP}:8765"
+  ACCESS_URL="http://${UI_BIND_ADDR}:${PORT}"
+  TUNNEL_HINT=""
 fi
 
 echo ""
@@ -234,9 +259,19 @@ echo -e "${BLUE}═════════════════════�
 echo -e "${GREEN} 部署完成${NC}"
 echo -e "${BLUE}════════════════════════════════════════════════${NC}"
 echo -e "  访问地址 : ${GREEN}${ACCESS_URL}${NC}"
+if [[ -n "$TUNNEL_HINT" ]]; then
+  echo -e "  本机转发 : 在你自己电脑上执行 ${GREEN}${TUNNEL_HINT}${NC}"
+  echo -e "             然后浏览器打开 ${GREEN}http://127.0.0.1:${PORT}${NC}"
+fi
+echo -e "  绑定地址 : ${UI_BIND_ADDR}（改 .env 的 UI_BIND_ADDR 后重跑本脚本即可换）"
 echo -e "  当前版本 : ${GREEN}${VERSION}${NC}"
 echo -e "  管理口令 : ${YELLOW}${UI_PASSWORD}${NC}"
-[[ "$GENERATED" == "true" ]] && echo -e "  （口令本次自动生成，已写入 .env，可自行修改后重跑本脚本）"
+if [[ "$GENERATED" == "true" ]]; then
+  echo -e "  （口令本次自动生成，已写入 .env，可自行修改后重跑本脚本）"
+fi
+if [[ "$UI_BIND_ADDR" == "0.0.0.0" || "$UI_BIND_ADDR" == "*" ]]; then
+  echo -e "  ${YELLOW}注意：界面已对外绑定 ${UI_BIND_ADDR}，请确认云安全组/防火墙已限制来源，或改用内网地址${NC}"
+fi
 echo -e "  new-api 容器 : ${CONTAINER}"
 echo -e "  数据网络     : ${NETWORK_NAME}（${OVERLAY} 模式）"
 if [[ -z "$SQL_DSN" ]]; then
