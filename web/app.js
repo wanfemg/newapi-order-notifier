@@ -27,7 +27,7 @@ const FIELDS = {
     { key: 'push_expired', label: '推送超时订单', hint: '支付超时，原因由订单数据推导' },
     { key: 'scope_wallet', label: '包含钱包充值', hint: 'top_ups 表订单' },
     { key: 'scope_subscription', label: '包含订阅订单', hint: 'subscription_orders 表订单' },
-    { key: 'backfill', label: '首次运行补推历史订单', hint: '默认关闭：首次只登记存量，不补推历史' },
+    { key: 'backfill', label: '首次运行补推历史订单', hint: '默认关闭：首次只登记存量；补推的历史订单会标注「补发推送」' },
     { key: 'lookback_hours', label: '回溯窗口（小时）', hint: '每轮扫描最近 N 小时的订单' },
   ],
 };
@@ -202,6 +202,7 @@ function renderStatus(status) {
     ['上次运行', status.last_run ? formatTime(status.last_run) : '-'],
     ['本轮订单', status.last_orders],
     ['累计推送', status.pushed_total],
+    ['版本', status.version || '-'],
   ];
   for (const [name, value] of parts) {
     const span = document.createElement('span');
@@ -255,7 +256,8 @@ function renderHistory(items) {
     cell(row, `¥${Number(item.money || 0).toFixed(2)}`);
     cell(row, item.reason || '-', 'reason');
     badgeCell(row, SOURCE_TEXT[item.reason_source] || item.reason_source || '-', 'source');
-    cell(row, item.ok ? '✅ 成功' : '❌ 失败', item.ok ? 'ok' : 'bad');
+    const pushText = (item.ok ? '✅ 成功' : '❌ 失败') + (item.backfill ? ' · 📮 补发推送' : '');
+    cell(row, pushText, item.ok ? 'ok' : 'bad');
     body.appendChild(row);
   }
 }
@@ -330,6 +332,20 @@ function bind() {
     const { ok, data } = await api('/api/check', { method: 'POST' });
     setMessage('check-msg', ok ? `✅ ${data.detail || '连接正常'}` : `❌ ${data.detail || '连接失败'}`,
       ok ? 'ok' : 'bad');
+  });
+
+  $('backfill').addEventListener('click', async () => {
+    const hours = Number($('bf-hours').value);
+    if (!Number.isInteger(hours) || hours < 1 || hours > 720) {
+      return setMessage('bf-msg', '回溯小时数需要在 1 ~ 720 之间', 'bad');
+    }
+    if (!confirm(`确定补发最近 ${hours} 小时的订单？消息会标注「补发推送」。`)) return;
+    setMessage('bf-msg', '补发中…（订单较多时需要等一会儿）');
+    const { ok, data } = await api('/api/backfill', { method: 'POST', body: { hours } });
+    if (!ok) return setMessage('bf-msg', `❌ ${data.error || '补发失败'}`, 'bad');
+    setMessage('bf-msg', `✅ 已补发 ${data.count} 条（最近 ${data.hours} 小时）`, 'ok');
+    await loadHistory();
+    await loadStatus();
   });
 
   $('refresh').addEventListener('click', () => {

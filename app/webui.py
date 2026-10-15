@@ -184,6 +184,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._save_config()
         if path == "/api/test":
             return self._test_dingtalk()
+        if path == "/api/backfill":
+            return self._backfill()
         if path == "/api/check":
             return self._check_source()
         if path == "/api/history/clear":
@@ -253,9 +255,28 @@ class Handler(BaseHTTPRequestHandler):
     def _status(self):
         status = dict(self.server.poller.status)
         status["pushed_total"] = self.server.store.pushed_count()
+        status["version"] = config_module.VERSION
         status["warnings"] = config_module.validate(
             config_module.effective_config(self.server.store))
         return status
+
+    def _backfill(self):
+        """补发最近 N 小时的订单：忽略去重记录，消息标注「补发推送」。"""
+        body = self._read_json() or {}
+        try:
+            hours = int(body.get("hours", 24))
+        except (TypeError, ValueError):
+            return self._json({"error": "回溯小时数需要是整数"}, 400)
+        if not 1 <= hours <= 720:
+            return self._json({"error": "回溯小时数需要在 1 ~ 720 之间"}, 400)
+        config = config_module.effective_config(self.server.store)
+        problems = config_module.validate(config)
+        if problems:
+            return self._json({"error": "配置不完整：" + "；".join(problems)}, 400)
+        if not config["dingtalk_webhook"]:
+            return self._json({"error": "请先填写并保存钉钉 Webhook"}, 400)
+        count = self.server.poller.backfill(hours)
+        return self._json({"ok": True, "count": count, "hours": hours})
 
     # ---------- 基础设施 ----------
 

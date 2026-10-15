@@ -21,4 +21,5 @@ services:
       SQL_DSN: "${SQL_DSN:-}"
       SQLITE_PATH: "${SQLITE_PATH:-}"
       POLL_INTERVAL: "${POLL_INTERVAL:-10s}"
+      APP_VERSION: "${APP_VERSION:-unknown}"
       TZ: "${TZ:-Asia/Shanghai}"

@@ -40,6 +40,10 @@ PROJECT_DIR=$(resolve_project_dir) \
 cd "$PROJECT_DIR"
 log_info "项目目录：$PROJECT_DIR"
 
+# 版本号用于在部署横幅和界面里确认“到底升没升上去”
+VERSION=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+log_info "当前版本：$VERSION"
+
 # ---------- 1. 环境检查 ----------
 
 command -v docker >/dev/null 2>&1 || die "未检测到 docker，请先安装 Docker"
@@ -205,6 +209,7 @@ fi
   printf 'UI_BIND_PORT=%s\n' "$UI_BIND_PORT"
   printf 'UI_PUBLISH_PORT=8765\n'
   printf 'POLL_INTERVAL=10s\n'
+  printf 'APP_VERSION=%s\n' "$VERSION"
   printf 'TZ=Asia/Shanghai\n'
 } > .env
 mkdir -p data
@@ -229,6 +234,7 @@ echo -e "${BLUE}═════════════════════�
 echo -e "${GREEN} 部署完成${NC}"
 echo -e "${BLUE}════════════════════════════════════════════════${NC}"
 echo -e "  访问地址 : ${GREEN}${ACCESS_URL}${NC}"
+echo -e "  当前版本 : ${GREEN}${VERSION}${NC}"
 echo -e "  管理口令 : ${YELLOW}${UI_PASSWORD}${NC}"
 [[ "$GENERATED" == "true" ]] && echo -e "  （口令本次自动生成，已写入 .env，可自行修改后重跑本脚本）"
 echo -e "  new-api 容器 : ${CONTAINER}"

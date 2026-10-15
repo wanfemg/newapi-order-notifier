@@ -98,12 +98,14 @@ def resolve_reason(order):
     return "", ""
 
 
-def render_message(order, username, plan_title, reason, reason_source):
-    """生成钉钉 markdown 消息，返回 (标题, 正文)。"""
+def render_message(order, username, plan_title, reason, reason_source, backfill=False):
+    """生成钉钉 markdown 消息，返回 (标题, 正文)。backfill 为真时标注「补发推送」。"""
     kind = order["kind"]
     status = order["status"]
     titles = WALLET_TITLES if kind == "wallet" else SUBSCRIPTION_TITLES
     headline = titles[status]
+    if backfill:
+        headline += "（补发推送）"
 
     lines = [f"### {headline}"]
     lines.append(f"- **订单号**：{order['trade_no']}")
@@ -136,6 +138,8 @@ class Poller:
         self.store = store
         self.log = logging.getLogger("poller")
         self._stop = threading.Event()
+        # 补发与常规轮询互斥，避免同一订单被同时处理而重复推送
+        self._lock = threading.Lock()
         self.status = {
             "runs": 0,
             "last_run": 0,
@@ -149,6 +153,15 @@ class Poller:
 
     def run_once(self):
         """执行一轮：拉取订单 → 检测新状态 → 推送。返回本轮成功推送数。"""
+        with self._lock:
+            return self._run()
+
+    def backfill(self, hours):
+        """补发最近 N 小时的终态订单：忽略去重记录，消息标注「补发推送」。"""
+        with self._lock:
+            return self._run(backfill=True, window_hours=int(hours))
+
+    def _run(self, backfill=False, window_hours=None):
         config = config_module.effective_config(self.store)
         problems = config_module.validate(config)
         if problems:
@@ -156,7 +169,8 @@ class Poller:
             return 0
 
         source = SourceDB(config)
-        since = int(time.time()) - int(config["lookback_hours"]) * 3600
+        window = int(window_hours or config["lookback_hours"])
+        since = int(time.time()) - window * 3600
         orders = source.orders(since, limit=500)
         self.status["last_orders"] = len(orders)
 
@@ -165,7 +179,9 @@ class Poller:
             [order["plan_id"] for order in orders if order["kind"] == "subscription"])
 
         initialized = self.store.get_state("initialized") == "1"
-        silent_first_run = (not initialized) and (not config["backfill"])
+        # 首次运行且开着「回溯历史订单」时，存量订单同样算补发
+        mark_backfill = backfill or ((not initialized) and bool(config["backfill"]))
+        silent_first_run = (not initialized) and (not config["backfill"]) and not backfill
         mobiles = [m for m in (config["dingtalk_at_mobiles"] or "").split(",") if m.strip()]
 
         pushed = 0
@@ -173,7 +189,7 @@ class Poller:
             if not self._wanted(order, config):
                 continue
             kind, trade_no, status = order["kind"], order["trade_no"], order["status"]
-            if self.store.is_pushed(kind, trade_no, status):
+            if not backfill and self.store.is_pushed(kind, trade_no, status):
                 continue
 
             if silent_first_run:
@@ -184,7 +200,8 @@ class Poller:
             username = usernames.get(int(order["user_id"] or 0)) or f"用户#{order['user_id']}"
             plan_title = plan_titles.get(int(order.get("plan_id") or 0), "")
             reason, reason_source = resolve_reason(order)
-            title, text = render_message(order, username, plan_title, reason, reason_source)
+            title, text = render_message(order, username, plan_title, reason, reason_source,
+                                         backfill=mark_backfill)
 
             ok, detail = send_markdown(
                 config["dingtalk_webhook"], title, text,
@@ -195,6 +212,7 @@ class Poller:
                 "kind": kind, "trade_no": trade_no, "status": status,
                 "username": username, "money": order.get("money") or 0,
                 "reason": reason, "reason_source": reason_source, "ok": ok, "detail": detail,
+                "backfill": mark_backfill,
             })
             if ok:
                 self.store.mark_pushed(kind, trade_no, status)
@@ -207,10 +225,13 @@ class Poller:
         if not initialized:
             self.store.set_state("initialized", "1")
 
+        if not backfill:
+            self.status["runs"] += 1
         self.status["pushed"] += pushed
-        self.status["runs"] += 1
         self.status["last_run"] = int(time.time())
         self.status["last_error"] = ""
+        if backfill:
+            self.log.info("补发推送完成：窗口 %s 小时，成功 %s 条", window, pushed)
         return pushed
 
     @staticmethod

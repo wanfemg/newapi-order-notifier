@@ -80,6 +80,7 @@ button.ghost { background: transparent; }
 .sticky { position: sticky; bottom: 0; background: rgba(15, 17, 21, .92); padding: 12px 0; backdrop-filter: blur(4px); }
 
 .muted { color: var(--muted); font-size: 13px; }
+.num { width: 110px; }
 .error { color: var(--bad); font-size: 13px; min-height: 18px; margin: 0; }
 .ok { color: var(--ok); }
 .bad { color: var(--bad); }

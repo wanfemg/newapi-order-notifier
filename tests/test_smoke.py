@@ -140,6 +140,7 @@ def main():
     check("- **支付方式**：微小信" in text, "微信支付显示为微小信（不是 epay）")
     check("bob" in text, "显示的是用户名而不是 display_name")
     check("鲍勃" not in text, "没有显示 display_name")
+    check("补发推送" not in text, "普通推送不带补发标注")
 
     print("\n3) 重复轮询不重复推送")
     poller.run_once()
@@ -186,7 +187,38 @@ def main():
     history = store.history(10)
     check(len(history) == 3, f"推送历史记录了 {len(history)} 条")
     check(all(item["ok"] == 1 for item in history), "历史记录都是发送成功")
+    check(all(item["backfill"] == 0 for item in history), "普通推送的历史记录不带补发标记")
     check(config_module.effective_config(store)["db_type"] == "sqlite", "配置可正常读取")
+
+    print("\n9) 补发推送：绕过去重并标注补发推送")
+    before = len(RECEIVED)
+    count = poller.backfill(1)
+    check(count == 5, f"补发最近 1 小时的 {count} 条终态订单")
+    check(len(RECEIVED) - before == count, "补发不受去重限制，全部重推")
+    check(all("（补发推送）" in item["markdown"]["text"] for item in RECEIVED[before:]),
+          "补发消息正文都标注了补发推送")
+    check(all("（补发推送）" in item["markdown"]["title"] for item in RECEIVED[before:]),
+          "钉钉消息标题同样带补发标注")
+    check(len([item for item in store.history(50) if item["backfill"] == 1]) == count,
+          "推送历史记录了补发标记")
+    check("补发推送" not in store.history(50)[0]["reason"], "补发标记不污染失败原因字段")
+
+    print("\n10) 首次运行开启回溯时也标注补发推送")
+    store2 = store_module.Store(os.path.join(tmp, "notifier2.db"))
+    store2.set_configs({
+        "db_type": "sqlite",
+        "sqlite_path": db_path,
+        "dingtalk_webhook": f"http://127.0.0.1:{port}/robot/send",
+        "enabled": True,
+        "backfill": True,
+    })
+    poller2 = poller_module.Poller(store2)
+    before = len(RECEIVED)
+    poller2.run_once()
+    check(len(RECEIVED) - before == 5, "首次运行回溯推送了全部存量订单")
+    check(all("（补发推送）" in item["markdown"]["text"] for item in RECEIVED[before:]),
+          "回溯的存量订单也标注补发推送")
+    check(store2.get_state("initialized") == "1", "回溯后同样标记为已初始化")
 
     failed = [label for ok, label in CHECKS if not ok]
     print("\n" + "=" * 56)

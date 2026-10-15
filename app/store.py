@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS push_history (
     reason        TEXT NOT NULL,
     reason_source TEXT NOT NULL,
     ok            INTEGER NOT NULL,
+    backfill      INTEGER NOT NULL DEFAULT 0,
     detail        TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS admin_credential (
@@ -54,6 +55,15 @@ class Store:
         with self._lock:
             self._conn.executescript("PRAGMA journal_mode=WAL;")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+
+    def _migrate(self):
+        """老库补列：已存在的 push_history 表不会因为 _SCHEMA 变化而自动加列。"""
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(push_history)")}
+        if "backfill" not in columns:
+            self._conn.execute(
+                "ALTER TABLE push_history ADD COLUMN backfill INTEGER NOT NULL DEFAULT 0")
+            self._conn.commit()
 
     def _write(self, sql, args=()):
         with self._lock:
@@ -108,14 +118,15 @@ class Store:
     def add_history(self, record):
         self._write(
             "INSERT INTO push_history "
-            "(pushed_at, kind, trade_no, status, username, money, reason, reason_source, ok, detail) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(pushed_at, kind, trade_no, status, username, money, reason, reason_source, ok, "
+            "backfill, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(record.get("pushed_at") or time.time()),
                 record["kind"], record["trade_no"], record["status"],
                 record.get("username", ""), float(record.get("money") or 0),
                 record.get("reason", ""), record.get("reason_source", ""),
-                1 if record.get("ok") else 0, record.get("detail", ""),
+                1 if record.get("ok") else 0, 1 if record.get("backfill") else 0,
+                record.get("detail", ""),
             ),
         )
         self._write(

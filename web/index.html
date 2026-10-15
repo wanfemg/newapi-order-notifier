@@ -53,6 +53,17 @@
     </div>
 
     <section class="card">
+      <h2>推送补发</h2>
+      <p class="muted">把最近 N 小时的订单再推一遍（不受「已推送」去重限制），消息标题会标注「补发推送」。</p>
+      <div class="actions">
+        <label class="muted" for="bf-hours">回溯小时数</label>
+        <input type="number" id="bf-hours" class="num" value="24" min="1" max="720">
+        <button id="backfill">📮 补发推送</button>
+        <span id="bf-msg" class="muted"></span>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>最近推送记录</h2>
       <div class="actions">
         <button id="refresh" class="ghost">🔄 刷新</button>
