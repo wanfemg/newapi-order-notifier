@@ -29,6 +29,18 @@ PROVIDER_LABELS = {
     "balance": "余额",
 }
 
+# 订单的 payment_method 存的才是真实支付类型，payment_provider 只是网关名（如 epay）
+PAY_METHOD_LABELS = {
+    "wxpay": "微小信",
+    "wxpay2": "微小信",
+    "wechat": "微小信",
+    "weixin": "微小信",
+    "wx": "微小信",
+    "alipay": "支小宝",
+    "alipay2": "支小宝",
+    "ali": "支小宝",
+}
+
 WALLET_TITLES = {"success": "💰 充值成功", "failed": "❌ 充值失败", "expired": "⏰ 充值超时"}
 SUBSCRIPTION_TITLES = {"success": "🎫 订阅开通成功", "failed": "❌ 订阅支付失败", "expired": "⏰ 订阅支付超时"}
 
@@ -59,6 +71,15 @@ def provider_label(provider):
     if not provider:
         return "未知渠道"
     return PROVIDER_LABELS.get(provider, provider)
+
+
+def pay_method_label(method, provider=""):
+    """支付方式：优先订单的真实支付类型（wxpay/alipay），为空时回退渠道名。"""
+    key = (method or "").strip() or (provider or "").strip()
+    if not key:
+        return "未知方式"
+    lower = key.lower()
+    return PAY_METHOD_LABELS.get(lower) or PROVIDER_LABELS.get(lower) or key
 
 
 def resolve_reason(order):
@@ -105,7 +126,7 @@ def render_message(order, username, plan_title, reason, reason_source):
         else:
             lines.append(f"- **失败原因**：未获取到，请到 new-api 后台查看订单 {order['trade_no']}")
 
-    lines.append(f"- **支付方式**：{order.get('payment_provider') or order.get('payment_method') or '-'}")
+    lines.append(f"- **支付方式**：{pay_method_label(order.get('payment_method'), order.get('payment_provider'))}")
     lines.append(f"- **时间**：{format_time(order.get('complete_time') or order.get('create_time'))}")
     return headline, "\n".join(lines)
 

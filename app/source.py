@@ -178,7 +178,8 @@ class SourceDB:
             f"SELECT id, username, display_name FROM users WHERE id IN ({marks})", ids)
         result = {}
         for row in rows:
-            name = (row.get("display_name") or "").strip() or (row.get("username") or "").strip()
+            # 优先用户名：new-api 建 root 用户时 display_name 是写死的 "Root User"
+            name = (row.get("username") or "").strip() or (row.get("display_name") or "").strip()
             result[int(row["id"])] = name or f"用户#{row['id']}"
         return result
 
