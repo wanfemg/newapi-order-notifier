@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>new-api 订单通知</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="login" class="overlay hidden">
+    <form id="login-form" class="card login-card">
+      <h2>🔒 管理登录</h2>
+      <p class="muted">口令在容器日志中打印（或由 UI_PASSWORD 环境变量指定）</p>
+      <input type="password" id="password" placeholder="管理口令" autocomplete="current-password" required>
+      <button type="submit" class="primary">登录</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <main id="app" class="hidden">
+    <header>
+      <h1>🔔 new-api 订单通知</h1>
+      <div id="statusbar" class="statusbar"></div>
+      <button id="logout" class="ghost">退出</button>
+    </header>
+
+    <section class="card">
+      <h2>钉钉推送</h2>
+      <div id="group-dingtalk" class="grid"></div>
+      <div class="actions">
+        <button id="test">📤 测试发送</button>
+        <span id="test-msg" class="muted"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>new-api 数据源（只读）</h2>
+      <div id="group-source" class="grid"></div>
+      <div class="actions">
+        <button id="check">🔌 测试连接</button>
+        <span id="check-msg" class="muted"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>推送控制</h2>
+      <div id="group-push" class="grid"></div>
+    </section>
+
+    <div class="actions sticky">
+      <button id="save" class="primary">💾 保存配置</button>
+      <span id="save-msg" class="muted"></span>
+    </div>
+
+    <section class="card">
+      <h2>最近推送记录</h2>
+      <div class="actions">
+        <button id="refresh" class="ghost">🔄 刷新</button>
+        <button id="clear" class="ghost">🗑 清空记录</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th><th>状态</th><th>订单号</th><th>用户</th>
+              <th>金额</th><th>失败原因</th><th>来源</th><th>推送</th>
+            </tr>
+          </thead>
+          <tbody id="history"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

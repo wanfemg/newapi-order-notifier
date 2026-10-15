@@ -1,0 +1,24 @@
+# 基础服务定义。网络与端口由 deploy.sh 选择的 overlay 决定：
+#   docker-compose.bridge.yml —— 加入 new-api 所在的 docker 网络，并发布界面端口
+#   docker-compose.host.yml   —— new-api 用 host 网络时，本服务同样用 host 网络
+# 建议直接用 deploy.sh 一键部署，它会自动检测并生成 .env。
+
+services:
+  order-notifier:
+    build:
+      context: .
+    image: newapi-order-notifier:latest
+    container_name: newapi-order-notifier
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - "${NEWAPI_DATA_HOST:-./data/newapi-data}:/newapi-data:ro"
+    environment:
+      DATA_DIR: /data
+      UI_BIND: 0.0.0.0
+      UI_PORT: "${UI_BIND_PORT:-8080}"
+      UI_PASSWORD: "${UI_PASSWORD:?run deploy.sh or create .env first}"
+      SQL_DSN: "${SQL_DSN:-}"
+      SQLITE_PATH: "${SQLITE_PATH:-}"
+      POLL_INTERVAL: "${POLL_INTERVAL:-10s}"
+      TZ: "${TZ:-Asia/Shanghai}"

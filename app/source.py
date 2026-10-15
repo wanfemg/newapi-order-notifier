@@ -1,0 +1,196 @@
+"""只读访问 new-api 数据库：支付订单、用户名、订阅方案名。
+
+new-api 的两张订单表：
+  top_ups(id, user_id, amount, money, trade_no, payment_method, payment_provider,
+          create_time, complete_time, status)
+  subscription_orders(id, user_id, plan_id, money, trade_no, payment_method,
+          payment_provider, status, create_time, complete_time, provider_payload)
+状态取值：pending / success / failed / expired（两张表共用）。
+"""
+
+import os
+import re
+import sqlite3
+import urllib.parse
+
+TERMINAL_STATUSES = ("success", "failed", "expired")
+
+
+class SourceError(Exception):
+    pass
+
+
+def parse_dsn(dsn):
+    """解析 new-api 的 SQL_DSN，兼容 postgresql:// 与 mysql 的两种常见写法。"""
+    text = (dsn or "").strip()
+    if text.startswith(("postgres://", "postgresql://")):
+        parsed = urllib.parse.urlparse(text)
+        return {
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 5432,
+            "user": urllib.parse.unquote(parsed.username or ""),
+            "password": urllib.parse.unquote(parsed.password or ""),
+            "dbname": (parsed.path or "/").lstrip("/"),
+            "params": dict(urllib.parse.parse_qsl(parsed.query)),
+        }
+    if text.startswith("mysql://"):
+        parsed = urllib.parse.urlparse(text)
+        return {
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 3306,
+            "user": urllib.parse.unquote(parsed.username or ""),
+            "password": urllib.parse.unquote(parsed.password or ""),
+            "dbname": (parsed.path or "/").lstrip("/"),
+            "params": dict(urllib.parse.parse_qsl(parsed.query)),
+        }
+    # PostgreSQL 关键字写法：host=... port=... user=... password=... dbname=...
+    if "://" not in text and re.search(r"(^|\s)host=", text):
+        info = {"host": "localhost", "port": 5432, "user": "", "password": "",
+                "dbname": "", "params": {}}
+        for token in text.split():
+            key, _, value = token.partition("=")
+            if key in ("host", "user", "password", "dbname"):
+                info[key] = value
+            elif key == "database":
+                info["dbname"] = value
+            elif key == "port":
+                info["port"] = int(value)
+            elif key:
+                info["params"][key] = value  # 如 TimeZone / sslmode 原样透传
+        if info["dbname"]:
+            return info
+
+    match = re.match(
+        r"^(?P<user>[^:@/]*)(:(?P<password>[^@]*))?@tcp\((?P<host>[^:)]+)"
+        r"(:(?P<port>\d+))?\)/(?P<dbname>[^?]*)(\?(?P<query>.*))?$",
+        text,
+    )
+    if match:
+        return {
+            "host": match.group("host"),
+            "port": int(match.group("port") or 3306),
+            "user": match.group("user") or "root",
+            "password": match.group("password") or "",
+            "dbname": match.group("dbname") or "",
+            "params": dict(urllib.parse.parse_qsl(match.group("query") or "")),
+        }
+    raise SourceError(
+        "无法解析 SQL_DSN，请使用 postgresql://user:pass@host:5432/dbname "
+        "或 user:pass@tcp(host:3306)/dbname"
+    )
+
+
+class SourceDB:
+    """只执行 SELECT，绝不写入 new-api 的库。"""
+
+    def __init__(self, config):
+        self.db_type = config["db_type"]
+        self.dsn = config["db_dsn"]
+        self.sqlite_path = config["sqlite_path"]
+
+    @property
+    def placeholder(self):
+        return "?" if self.db_type == "sqlite" else "%s"
+
+    def _connect(self):
+        if self.db_type == "sqlite":
+            if not self.sqlite_path or not os.path.exists(self.sqlite_path):
+                raise SourceError(f"new-api 的 SQLite 文件不存在：{self.sqlite_path}")
+            conn = sqlite3.connect(f"file:{self.sqlite_path}?mode=ro", uri=True, timeout=5)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        info = parse_dsn(self.dsn)
+        if self.db_type == "postgres":
+            try:
+                import psycopg2
+            except ImportError:
+                raise SourceError("缺少 psycopg2 依赖，请安装 requirements.txt") from None
+            conn = psycopg2.connect(
+                host=info["host"], port=info["port"], user=info["user"],
+                password=info["password"], dbname=info["dbname"],
+                connect_timeout=5, **info["params"],
+            )
+            conn.set_session(readonly=True)
+            return conn
+
+        if self.db_type == "mysql":
+            try:
+                import pymysql
+            except ImportError:
+                raise SourceError("缺少 PyMySQL 依赖，请安装 requirements.txt") from None
+            params = {"charset": "utf8mb4", "connect_timeout": 5}
+            params.update(info["params"])
+            return pymysql.connect(
+                host=info["host"], port=info["port"], user=info["user"],
+                password=info["password"], database=info["dbname"], **params,
+            )
+
+        raise SourceError(f"不支持的数据源类型：{self.db_type}")
+
+    def _fetch(self, sql, args):
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql, args)
+            names = [column[0] for column in cursor.description]
+            return [dict(zip(names, row)) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def ping(self):
+        """连接自检，返回一句可展示的说明。"""
+        rows = self._fetch("SELECT 1 AS ok", ())
+        if not rows:
+            raise SourceError("连接成功但查询无返回")
+        return f"{self.db_type} 连接正常"
+
+    def orders(self, since_ts, limit=500):
+        """按创建时间窗口取已出结果（success/failed/expired）的全部订单。"""
+        p = self.placeholder
+        statuses = ",".join([p] * len(TERMINAL_STATUSES))
+        wallet = (
+            "SELECT 'wallet' AS kind, id, user_id, money, amount, trade_no, "
+            "payment_method, payment_provider, status, create_time, complete_time, "
+            "0 AS plan_id, '' AS provider_payload FROM top_ups "
+            f"WHERE create_time >= {p} AND status IN ({statuses})"
+        )
+        subscription = (
+            "SELECT 'subscription' AS kind, id, user_id, money, 0 AS amount, trade_no, "
+            "payment_method, payment_provider, status, create_time, complete_time, "
+            "plan_id, provider_payload FROM subscription_orders "
+            f"WHERE create_time >= {p} AND status IN ({statuses})"
+        )
+        sql = (
+            f"SELECT * FROM ({wallet} UNION ALL {subscription}) AS orders "
+            f"ORDER BY create_time DESC LIMIT {p}"
+        )
+        args = [since_ts, *TERMINAL_STATUSES, since_ts, *TERMINAL_STATUSES, int(limit)]
+        return self._fetch(sql, args)
+
+    def usernames(self, user_ids):
+        ids = sorted({int(uid) for uid in user_ids if uid})
+        if not ids:
+            return {}
+        p = self.placeholder
+        marks = ",".join([p] * len(ids))
+        rows = self._fetch(
+            f"SELECT id, username, display_name FROM users WHERE id IN ({marks})", ids)
+        result = {}
+        for row in rows:
+            name = (row.get("display_name") or "").strip() or (row.get("username") or "").strip()
+            result[int(row["id"])] = name or f"用户#{row['id']}"
+        return result
+
+    def plan_titles(self, plan_ids):
+        ids = sorted({int(pid) for pid in plan_ids if pid})
+        if not ids:
+            return {}
+        p = self.placeholder
+        marks = ",".join([p] * len(ids))
+        try:
+            rows = self._fetch(
+                f"SELECT id, title FROM subscription_plans WHERE id IN ({marks})", ids)
+        except Exception:
+            return {}  # 老版本库可能还没有 subscription_plans 表
+        return {int(row["id"]): (row.get("title") or "") for row in rows}

@@ -1,0 +1,12 @@
+# 覆盖层：new-api 使用普通 docker 网络时，本服务加入同一网络并发布界面端口
+services:
+  order-notifier:
+    ports:
+      - "${UI_PUBLISH_PORT:-8765}:${UI_BIND_PORT:-8080}"
+    networks:
+      - newapi
+
+networks:
+  newapi:
+    external: true
+    name: ${NEWAPI_NETWORK:-new-api-network}
