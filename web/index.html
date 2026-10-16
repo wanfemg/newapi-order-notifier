@@ -3,94 +3,51 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>new-api 订单通知</title>
+  <title>new-api 财务后台</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div id="login" class="overlay hidden">
-    <form id="login-form" class="card login-card">
-      <h2>🔒 管理登录</h2>
+    <form id="login-form" class="glass login-card">
+      <h2>管理登录</h2>
       <p class="muted">口令在容器日志中打印（或由 UI_PASSWORD 环境变量指定）</p>
-      <input type="password" id="password" placeholder="管理口令" autocomplete="current-password" required>
-      <button type="submit" class="primary">登录</button>
-      <p id="login-error" class="error"></p>
+      <input type="password" id="password" placeholder="管理口令" aria-label="管理口令" autocomplete="current-password" required>
+      <button type="submit" class="btn primary">登录</button>
+      <p id="login-error" class="error" role="status"></p>
     </form>
   </div>
 
-  <main id="app" class="hidden">
-    <header>
-      <h1>🔔 new-api 订单通知</h1>
-      <div id="statusbar" class="statusbar"></div>
-      <button id="logout" class="ghost">退出</button>
+  <div id="app" class="shell hidden">
+    <header class="topbar glass">
+      <div class="brand">
+        <span>财务后台</span>
+        <span id="version" class="pill"></span>
+      </div>
+      <div class="top-actions">
+        <div id="range" class="seg" aria-label="时间范围"></div>
+        <button id="theme-toggle" class="btn" title="切换深浅色">深色</button>
+        <button id="logout" class="btn ghost">退出</button>
+      </div>
     </header>
 
-    <section class="card">
-      <h2>钉钉推送</h2>
-      <div id="group-dingtalk" class="grid"></div>
-      <div class="actions">
-        <button id="test">📤 测试发送</button>
-        <span id="test-msg" class="muted"></span>
-      </div>
-    </section>
+    <nav class="nav glass" aria-label="主导航">
+      <a href="#/overview" data-view="overview">概览</a>
+      <a href="#/orders" data-view="orders">订单流水</a>
+      <a href="#/ranking" data-view="ranking">排行榜</a>
+      <a href="#/users" data-view="users">用户画像</a>
+      <a href="#/reports" data-view="reports">报表与推送</a>
+      <a href="#/settings" data-view="settings">设置</a>
+    </nav>
 
-    <section class="card">
-      <h2>new-api 数据源（只读）</h2>
-      <div id="group-source" class="grid"></div>
-      <div class="actions">
-        <button id="check">🔌 测试连接</button>
-        <span id="check-msg" class="muted"></span>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>推送控制</h2>
-      <div id="group-push" class="grid"></div>
-    </section>
-
-    <div class="actions sticky">
-      <button id="save" class="primary">💾 保存配置</button>
-      <span id="save-msg" class="muted"></span>
-    </div>
-
-    <section class="card">
-      <h2>推送补发</h2>
-      <p class="muted">把最近 N 小时的订单再推一遍（不受「已推送」去重限制），消息标题会标注「补发推送」。</p>
-      <div class="actions">
-        <label class="muted" for="bf-hours">回溯小时数</label>
-        <input type="number" id="bf-hours" class="num" value="24" min="1" max="720">
-        <button id="backfill">📮 补发推送</button>
-        <span id="bf-msg" class="muted"></span>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>每日充值统计</h2>
-      <p class="muted">每天 00:00 自动统计前一天的<strong>成功充值</strong>（钱包充值 + 订阅开通）并推送排行榜（前五名）。下面是立即生成一份<strong>今天</strong>的统计，用来验证配置是否正常。</p>
-      <div class="actions">
-        <button id="daily">📊 立即生成今日统计</button>
-        <span id="daily-msg" class="muted"></span>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>最近推送记录</h2>
-      <div class="actions">
-        <button id="refresh" class="ghost">🔄 刷新</button>
-        <button id="clear" class="ghost">🗑 清空记录</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>时间</th><th>状态</th><th>订单号</th><th>用户</th>
-              <th>金额</th><th>失败原因</th><th>来源</th><th>推送</th>
-            </tr>
-          </thead>
-          <tbody id="history"></tbody>
-        </table>
-      </div>
-    </section>
-  </main>
+    <main class="content">
+      <section id="view-overview" class="view"></section>
+      <section id="view-orders" class="view"></section>
+      <section id="view-ranking" class="view"></section>
+      <section id="view-users" class="view"></section>
+      <section id="view-reports" class="view"></section>
+      <section id="view-settings" class="view"></section>
+    </main>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

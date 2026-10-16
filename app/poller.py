@@ -104,12 +104,16 @@ def resolve_reason(order, config):
     return "", ""
 
 
-def render_message(order, username, plan_title, reason, reason_source, backfill=False):
+def render_message(order, username, plan_title, reason, reason_source, backfill=False,
+                   large_threshold=None):
     """生成钉钉 markdown 消息，返回 (标题, 正文)。backfill 为真时标注「补发推送」。"""
     kind = order["kind"]
     status = order["status"]
     titles = WALLET_TITLES if kind == "wallet" else SUBSCRIPTION_TITLES
     headline = titles[status]
+    if (status == "success" and large_threshold is not None
+            and float(order.get("money") or 0) >= large_threshold):
+        headline += "（大额订单）"
     if backfill:
         headline += "（补发推送）"
 
@@ -211,7 +215,8 @@ class Poller:
             plan_title = plan_titles.get(int(order.get("plan_id") or 0), "")
             reason, reason_source = resolve_reason(order, config)
             title, text = render_message(order, username, plan_title, reason, reason_source,
-                                         backfill=mark_backfill)
+                                         backfill=mark_backfill,
+                                         large_threshold=config["large_order_threshold"])
 
             ok, detail = send_markdown(
                 config["dingtalk_webhook"], title, text,
@@ -252,6 +257,9 @@ class Poller:
         if kind == "wallet" and not config["scope_wallet"]:
             return False
         if kind == "subscription" and not config["scope_subscription"]:
+            return False
+        if (status == "success"
+                and float(order.get("money") or 0) < config.get("min_push_amount", 0)):
             return False
         return {
             "success": config["push_success"],

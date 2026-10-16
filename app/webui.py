@@ -5,8 +5,10 @@ Cookie 且仅在内存中保存；登录失败限速；写操作要求 JSON 与�
 """
 
 import base64
+import csv
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -17,7 +19,9 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config as config_module
+import finance as finance_module
 from notify import send_markdown
+from poller import pay_method_label
 from source import SourceDB
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
@@ -82,6 +86,29 @@ def ensure_admin(store):
         raise SystemExit("UI_PASSWORD 至少需要 8 位")
     store.set_admin_hash(hash_password(password))
     return password, generated
+
+
+FLOW_STATUS_TEXT = {"success": "成功", "failed": "失败", "pending": "待支付"}
+FLOW_BUCKETS = ("success", "failed", "pending")
+
+
+def flow_bucket(status):
+    """超时归入失败，未到阈值的待支付订单不视为失败。"""
+    return "failed" if status == "expired" else (status or "pending")
+
+
+def flow_status_text(status, derived):
+    if status == "expired":
+        return "失败·超时（推导）" if derived else "失败·超时"
+    return FLOW_STATUS_TEXT.get(status, status)
+
+
+def csv_cell(value):
+    """阻止外部文本被电子表格解释为公式。"""
+    text = str(value or "")
+    if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")):
+        return "'" + text
+    return text
 
 
 class Sessions:
@@ -168,6 +195,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(self._status())
         if path == "/api/history":
             return self._json({"items": self.server.store.history(200)})
+        if path == "/api/finance/summary":
+            return self._finance_summary()
+        if path == "/api/finance/trend":
+            return self._finance_trend()
+        if path == "/api/finance/ranking":
+            return self._finance_ranking()
+        if path == "/api/finance/users":
+            return self._finance_users()
+        if path == "/api/reports":
+            config = config_module.effective_config(self.server.store)
+            return self._json({
+                "daily_report": config["daily_report"],
+                "weekly_report": config["weekly_report"],
+                "daily_last": self.server.store.get_state("daily_report_last"),
+                "weekly_last": self.server.store.get_state("weekly_report_last"),
+            })
+        if path == "/api/orders":
+            return self._orders()
+        if path == "/api/orders/export.csv":
+            return self._orders_export()
         return self._json({"error": "接口不存在"}, 404)
 
     def do_POST(self):
@@ -189,6 +236,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._backfill()
         if path == "/api/daily-report":
             return self._daily_report()
+        if path == "/api/weekly-report":
+            return self._weekly_report()
         if path == "/api/check":
             return self._check_source()
         if path == "/api/history/clear":
@@ -294,6 +343,173 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._json({"ok": False, "detail": str(exc)}, 400)
         return self._json({"ok": ok, "detail": detail}, 200 if ok else 400)
+
+    def _weekly_report(self):
+        """手动推送本周截至当前的统计，不改变自动报告状态。"""
+        try:
+            ok, detail = self.server.reporter.run_weekly(
+                offset_weeks=0, force=True, overrides=self._form_overrides())
+        except Exception as exc:
+            return self._json({"ok": False, "detail": str(exc)}, 400)
+        return self._json({"ok": ok, "detail": detail}, 200 if ok else 400)
+
+    # ---------- 财务看板 ----------
+
+    def _query(self):
+        return dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
+
+    def _qint(self, name, default, minimum, maximum):
+        raw = self._query().get(name, "")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(maximum, value))
+
+    def _finance_success(self, days):
+        """窗口内的成功订单行，供概览/趋势/排行复用。"""
+        start, end = finance_module.range_window(days)
+        source = SourceDB(config_module.effective_config(self.server.store))
+        return source.success_orders(int(start), int(end))
+
+    def _finance_summary(self):
+        days = self._qint("days", 7, 1, 365)
+        try:
+            rows = self._finance_success(days)
+        except Exception as exc:
+            return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
+        today_start, _ = finance_module.range_window(1)
+        today_rows = [row for row in rows if int(row.get("create_time") or 0) >= today_start]
+        return self._json({
+            "days": days,
+            "total": finance_module.totals(rows),
+            "today": finance_module.totals(today_rows),
+            "breakdown": finance_module.breakdown(rows),
+            "methods": finance_module.methods(rows),
+        })
+
+    def _finance_trend(self):
+        days = self._qint("days", 7, 1, 365)
+        try:
+            rows = self._finance_success(days)
+            return self._json(finance_module.trend(rows, days))
+        except Exception as exc:
+            return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
+
+    def _finance_ranking(self):
+        days = self._qint("days", 7, 1, 365)
+        limit = self._qint("limit", 10, 1, 50)
+        try:
+            rows = self._finance_success(days)
+            names = SourceDB(config_module.effective_config(self.server.store)).usernames(
+                [row["user_id"] for row in rows])
+        except Exception as exc:
+            return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
+        return self._json({"days": days, "items": finance_module.ranking(rows, names, limit)})
+
+    def _finance_users(self):
+        days = self._qint("days", 7, 1, 365)
+        try:
+            rows = self._finance_success(days)
+            names = SourceDB(config_module.effective_config(self.server.store)).usernames(
+                [row["user_id"] for row in rows])
+        except Exception as exc:
+            return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
+        return self._json({"days": days, "items": finance_module.users(rows, names)})
+
+    def _flow_rows(self, days, limit, buckets):
+        """窗口内的流水订单，超时未支付的 pending 按 expire_minutes 推导为超时。"""
+        start, end = finance_module.range_window(days)
+        config = config_module.effective_config(self.server.store)
+        expire_minutes = int(config["expire_minutes"] or 0)
+        expire_before = int(time.time()) - expire_minutes * 60 if expire_minutes > 0 else None
+        source = SourceDB(config)
+        rows = source.window_orders(int(start), int(end), limit, buckets, expire_before)
+        for row in rows:
+            if (row.get("status") == "pending" and expire_before is not None
+                    and int(row.get("create_time") or 0) <= expire_before):
+                row["status"] = "expired"
+                row["expired_derived"] = True
+        return rows
+
+    def _usernames(self, rows, config):
+        try:
+            return SourceDB(config).usernames([row["user_id"] for row in rows])
+        except Exception as exc:
+            logging.warning("读取用户名失败：%s", exc)
+            return {}
+
+    def _order_item(self, row, bucket, names):
+        uid = row.get("user_id")
+        return {
+            "kind": row.get("kind"),
+            "trade_no": row.get("trade_no") or "-",
+            "user_id": uid,
+            "username": names.get(int(uid)) if uid is not None else None,
+            "money": round(float(row.get("money") or 0), 2),
+            "method": pay_method_label(row.get("payment_method"), row.get("payment_provider")),
+            "bucket": bucket,
+            "status": row.get("status"),
+            "derived": bool(row.get("expired_derived")),
+            "create_time": row.get("create_time"),
+            "complete_time": row.get("complete_time"),
+            "plan_id": row.get("plan_id"),
+        }
+
+    def _order_filters(self):
+        raw_status = self._query().get("status", "success,failed")
+        return {token for token in raw_status.split(",") if token in FLOW_BUCKETS}
+
+    def _orders(self):
+        days = self._qint("days", 7, 1, 365)
+        limit = self._qint("limit", 500, 1, 2000)
+        wanted = self._order_filters()
+        try:
+            rows = self._flow_rows(days, limit + 1, wanted)
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            config = config_module.effective_config(self.server.store)
+            names = self._usernames(rows, config)
+            items = [
+                self._order_item(row, flow_bucket(row.get("status")), names)
+                for row in rows
+                if flow_bucket(row.get("status")) in wanted
+            ]
+        except Exception as exc:
+            return self._json({"error": f"读取订单失败：{exc}"}, 500)
+        return self._json({"days": days, "items": items, "has_more": has_more})
+
+    def _orders_export(self):
+        days = self._qint("days", 7, 1, 365)
+        limit = self._qint("limit", 2000, 1, 10000)
+        try:
+            rows = self._flow_rows(days, limit + 1, self._order_filters())
+            if len(rows) > limit:
+                return self._json({"error": "订单超出导出上限，请缩小日期范围后重试"}, 400)
+            config = config_module.effective_config(self.server.store)
+            names = self._usernames(rows, config)
+        except Exception as exc:
+            return self._json({"error": f"导出订单失败：{exc}"}, 500)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["时间", "状态", "订单号", "用户", "金额", "支付方式", "类型"])
+        for row in rows:
+            bucket = flow_bucket(row.get("status"))
+            uid = row.get("user_id")
+            username = names.get(int(uid)) or f"用户#{uid}" if uid is not None else "-"
+            writer.writerow([
+                time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(int(row.get("create_time") or 0))),
+                flow_status_text(row.get("status"), bool(row.get("expired_derived"))),
+                csv_cell(row.get("trade_no") or "-"),
+                csv_cell(username),
+                f"{float(row.get('money') or 0):.2f}",
+                csv_cell(pay_method_label(row.get("payment_method"), row.get("payment_provider"))),
+                "钱包充值" if row.get("kind") == "wallet" else "订阅开通",
+            ])
+        body = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+        extra = {"Content-Disposition": "attachment; filename=orders.csv"}
+        return self._send_bytes(body, "text/csv; charset=utf-8", extra)
 
     def _form_overrides(self):
         """读请求体里的钉钉推送项，供测试发送 / 生成统计即时使用（未保存也生效）。"""

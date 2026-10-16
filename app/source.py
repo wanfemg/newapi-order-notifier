@@ -202,6 +202,71 @@ class SourceDB:
             ("success", int(start_ts), int(end_ts)),
         )
 
+    def success_orders(self, start_ts, end_ts):
+        """窗口内的成功订单原始行（钱包 + 订阅），供财务看板聚合用。"""
+        p = self.placeholder
+        wallet = (
+            "SELECT 'wallet' AS kind, user_id, money, payment_method, payment_provider, "
+            "create_time, trade_no FROM top_ups "
+            f"WHERE status = {p} AND create_time >= {p} AND create_time < {p}"
+        )
+        subscription = (
+            "SELECT 'subscription' AS kind, user_id, money, payment_method, "
+            "payment_provider, create_time, trade_no FROM subscription_orders "
+            f"WHERE status = {p} AND create_time >= {p} AND create_time < {p}"
+        )
+        return self._fetch(
+            f"SELECT * FROM ({wallet} UNION ALL {subscription}) AS paid "
+            f"ORDER BY create_time DESC",
+            ("success", int(start_ts), int(end_ts),
+             "success", int(start_ts), int(end_ts)),
+        )
+
+    def window_orders(self, start_ts, end_ts, limit=500, buckets=("success", "failed"),
+                      expired_before=None):
+        """只读流水：先按成功/失败筛选再截取；超时推导共用机器人阈值。"""
+        p = self.placeholder
+        conditions = []
+        filter_args = []
+        if "success" in buckets:
+            conditions.append(f"status = {p}")
+            filter_args.append("success")
+        if "failed" in buckets:
+            conditions.append(f"status IN ({p}, {p})")
+            filter_args.extend(("failed", "expired"))
+            if expired_before is not None:
+                conditions.append(f"(status = {p} AND create_time <= {p})")
+                filter_args.extend(("pending", int(expired_before)))
+        if "pending" in buckets:
+            condition = f"status = {p}"
+            filter_args.append("pending")
+            if expired_before is not None:
+                condition += f" AND create_time > {p}"
+                filter_args.append(int(expired_before))
+            conditions.append(f"({condition})")
+        if not conditions:
+            return []
+        wallet = (
+            "SELECT 'wallet' AS kind, id, user_id, money, amount, trade_no, "
+            "payment_method, payment_provider, status, create_time, complete_time, "
+            "0 AS plan_id, '' AS provider_payload FROM top_ups "
+            f"WHERE create_time >= {p} AND create_time < {p}"
+        )
+        subscription = (
+            "SELECT 'subscription' AS kind, id, user_id, money, 0 AS amount, trade_no, "
+            "payment_method, payment_provider, status, create_time, complete_time, "
+            "plan_id, provider_payload FROM subscription_orders "
+            f"WHERE create_time >= {p} AND create_time < {p}"
+        )
+        sql = (
+            f"SELECT * FROM ({wallet} UNION ALL {subscription}) AS orders "
+            f"WHERE ({' OR '.join(conditions)}) "
+            f"ORDER BY create_time DESC, kind, id DESC LIMIT {p}"
+        )
+        return self._fetch(
+            sql, (int(start_ts), int(end_ts), int(start_ts), int(end_ts),
+                  *filter_args, int(limit)))
+
     def usernames(self, user_ids):
         ids = sorted({int(uid) for uid in user_ids if uid})
         if not ids:

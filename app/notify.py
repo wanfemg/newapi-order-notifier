@@ -49,13 +49,16 @@ def send_markdown(webhook, title, text, secret="", keyword="", at_mobiles=None, 
         separator = "&" if "?" in webhook else "?"
         url = f"{webhook}{separator}timestamp={timestamp}&sign={sign}"
 
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json;charset=utf-8"},
-        method="POST",
-    )
     try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return False, "Webhook 必须是完整的 HTTP/HTTPS 地址"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json;charset=utf-8"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
     except Exception as exc:  # 网络异常统一转成可展示的说明
@@ -65,6 +68,8 @@ def send_markdown(webhook, title, text, secret="", keyword="", at_mobiles=None, 
         data = json.loads(body)
     except json.JSONDecodeError:
         return False, f"响应无法解析：{body[:200]}"
+    if not isinstance(data, dict):
+        return False, "钉钉响应格式无效：预期 JSON 对象"
     if data.get("errcode") == 0:
         return True, "ok"
     return False, f"钉钉返回 errcode={data.get('errcode')} errmsg={data.get('errmsg')}"
