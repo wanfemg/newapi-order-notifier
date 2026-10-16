@@ -25,6 +25,7 @@ const FIELDS = {
     { key: 'push_success', label: '推送成功订单', hint: '钱包充值成功 / 订阅开通成功' },
     { key: 'push_failed', label: '推送失败订单', hint: '支付失败，原因取自订单数据或渠道推导' },
     { key: 'push_expired', label: '推送超时订单', hint: '支付超时，原因由订单数据推导' },
+    { key: 'expire_minutes', label: '超时未支付判定（分钟）', hint: 'new-api 不会把超时订单写成 expired，这里按「创建后超过 N 分钟仍待支付」推导为超时；0 表示关闭，N 建议与支付渠道的订单有效期一致' },
     { key: 'scope_wallet', label: '包含钱包充值', hint: 'top_ups 表订单' },
     { key: 'scope_subscription', label: '包含订阅订单', hint: 'subscription_orders 表订单' },
     { key: 'backfill', label: '首次运行补推历史订单', hint: '默认关闭：首次只登记存量；补推的历史订单会标注「补发推送」' },
@@ -41,7 +42,7 @@ const BOOL_KEYS = new Set([
   'enabled', 'push_success', 'push_failed',
   'push_expired', 'scope_wallet', 'scope_subscription', 'backfill',
 ]);
-const INT_KEYS = new Set(['poll_interval', 'lookback_hours']);
+const INT_KEYS = new Set(['poll_interval', 'lookback_hours', 'expire_minutes']);
 
 const $ = (id) => document.getElementById(id);
 const inputs = {};

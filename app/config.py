@@ -30,6 +30,9 @@ DEFAULTS = {
     "push_success": True,
     "push_failed": True,
     "push_expired": True,
+    # new-api 不会把超时未支付的订单写成 expired，这里按「创建后超过 N 分钟仍待支付」
+    # 自行推导为超时；0 表示关闭该推导
+    "expire_minutes": 30,
     "scope_wallet": True,
     "scope_subscription": True,
     "backfill": False,
@@ -40,7 +43,7 @@ BOOL_KEYS = {
     "enabled", "push_success", "push_failed",
     "push_expired", "scope_wallet", "scope_subscription", "backfill",
 }
-INT_KEYS = {"poll_interval", "lookback_hours"}
+INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes"}
 STR_KEYS = {"dingtalk_webhook", "dingtalk_secret", "dingtalk_keyword",
             "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path"}
 
@@ -138,6 +141,8 @@ def validate(config):
         errors.append("轮询间隔不能大于 86400 秒")
     if config["lookback_hours"] < 1:
         errors.append("回溯窗口不能小于 1 小时")
+    if not 0 <= config["expire_minutes"] <= 10080:
+        errors.append("超时判定分钟数需要在 0 ~ 10080 之间（0 表示关闭推导）")
     webhook = config["dingtalk_webhook"]
     if webhook and not webhook.startswith("https://"):
         # 仅本机回环地址放行 http，便于本地联调；其余必须是 https

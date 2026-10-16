@@ -2,7 +2,9 @@
 
 new-api 的订单表只存状态、不存失败原因，所以本项目不依赖运行日志，只按订单自身
 能拿到的信息给出原因：
-  1. expired：由订单数据推导 —— 下单后未在支付有效期内完成支付，即"超时"；
+  1. expired：订单表里真的写成了 expired 时取自订单数据；但 new-api 只在少数渠道
+     （如 Stripe 的会话超时回调）会写 expired，易支付这类渠道超时后订单会一直停在
+     pending，所以超过 expire_minutes 仍是 pending 的订单由本程序推导为超时；
   2. failed ：先看订单的 provider_payload（渠道回调原文），再看渠道名推导。
 每条消息都会标注原因来自「订单数据 / 推导」。
 """
@@ -82,11 +84,15 @@ def pay_method_label(method, provider=""):
     return PAY_METHOD_LABELS.get(lower) or PROVIDER_LABELS.get(lower) or key
 
 
-def resolve_reason(order):
+def resolve_reason(order, config):
     """返回 (原因文本, 来源标记)。原因只来自订单自身，不读运行日志。"""
     status = order["status"]
     if status == "expired":
         created = format_time(order.get("create_time"))
+        if order.get("expired_derived"):
+            # 订单表里一直是 pending，由本程序按判定时长推导为超时
+            minutes = int(config.get("expire_minutes") or 0)
+            return f"支付超时：下单后 {minutes} 分钟内未完成支付（下单时间 {created}）", "derived"
         return f"支付超时：下单后未在支付有效期内完成支付（下单时间 {created}）", "order"
     if status == "failed":
         payload = (order.get("provider_payload") or "").strip()
@@ -157,7 +163,7 @@ class Poller:
             return self._run()
 
     def backfill(self, hours):
-        """补发最近 N 小时的终态订单：忽略去重记录，消息标注「补发推送」。"""
+        """补发最近 N 小时的订单（含已判定超时的）：忽略去重记录，消息标注「补发推送」。"""
         with self._lock:
             return self._run(backfill=True, window_hours=int(hours))
 
@@ -169,9 +175,13 @@ class Poller:
             return 0
 
         source = SourceDB(config)
+        now = int(time.time())
         window = int(window_hours or config["lookback_hours"])
-        since = int(time.time()) - window * 3600
-        orders = source.orders(since, limit=500)
+        # 超过判定时长仍是 pending 的订单按超时处理，取数窗口不能小于判定时长
+        expire_seconds = int(config["expire_minutes"]) * 60
+        expire_before = now - expire_seconds if expire_seconds > 0 else None
+        since = now - max(window * 3600, expire_seconds)
+        orders = source.orders(since, limit=500, expired_before=expire_before)
         self.status["last_orders"] = len(orders)
 
         usernames = source.usernames([order["user_id"] for order in orders])
@@ -199,7 +209,7 @@ class Poller:
 
             username = usernames.get(int(order["user_id"] or 0)) or f"用户#{order['user_id']}"
             plan_title = plan_titles.get(int(order.get("plan_id") or 0), "")
-            reason, reason_source = resolve_reason(order)
+            reason, reason_source = resolve_reason(order, config)
             title, text = render_message(order, username, plan_title, reason, reason_source,
                                          backfill=mark_backfill)
 

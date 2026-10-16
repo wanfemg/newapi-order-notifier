@@ -145,28 +145,45 @@ class SourceDB:
             raise SourceError("连接成功但查询无返回")
         return f"{self.db_type} 连接正常"
 
-    def orders(self, since_ts, limit=500):
-        """按创建时间窗口取已出结果（success/failed/expired）的全部订单。"""
+    def orders(self, since_ts, limit=500, expired_before=None):
+        """按创建时间窗口取订单。
+
+        正常只取已出结果的（success/failed/expired）。传了 expired_before 时，额外把
+        创建时间早于它、状态仍停在 pending 的订单一起取出来，并在返回时标成 expired：
+        new-api 没有任何后台任务把「超时未支付」的订单写成 expired（只有 Stripe 会话
+        超时回调等少数路径会写），易支付等渠道超时后库里会一直是 pending。
+        """
         p = self.placeholder
         statuses = ",".join([p] * len(TERMINAL_STATUSES))
+        pending_clause = ""
+        pending_args = []
+        if expired_before is not None:
+            pending_clause = f" OR (status = {p} AND create_time <= {p})"
+            pending_args = ["pending", int(expired_before)]
         wallet = (
             "SELECT 'wallet' AS kind, id, user_id, money, amount, trade_no, "
             "payment_method, payment_provider, status, create_time, complete_time, "
             "0 AS plan_id, '' AS provider_payload FROM top_ups "
-            f"WHERE create_time >= {p} AND status IN ({statuses})"
+            f"WHERE create_time >= {p} AND (status IN ({statuses}){pending_clause})"
         )
         subscription = (
             "SELECT 'subscription' AS kind, id, user_id, money, 0 AS amount, trade_no, "
             "payment_method, payment_provider, status, create_time, complete_time, "
             "plan_id, provider_payload FROM subscription_orders "
-            f"WHERE create_time >= {p} AND status IN ({statuses})"
+            f"WHERE create_time >= {p} AND (status IN ({statuses}){pending_clause})"
         )
         sql = (
             f"SELECT * FROM ({wallet} UNION ALL {subscription}) AS orders "
             f"ORDER BY create_time DESC LIMIT {p}"
         )
-        args = [since_ts, *TERMINAL_STATUSES, since_ts, *TERMINAL_STATUSES, int(limit)]
-        return self._fetch(sql, args)
+        args = [since_ts, *TERMINAL_STATUSES, *pending_args,
+                since_ts, *TERMINAL_STATUSES, *pending_args, int(limit)]
+        rows = self._fetch(sql, args)
+        for row in rows:
+            if row.get("status") == "pending":
+                row["status"] = "expired"
+                row["expired_derived"] = True
+        return rows
 
     def usernames(self, user_ids):
         ids = sorted({int(uid) for uid in user_ids if uid})

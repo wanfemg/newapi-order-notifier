@@ -73,11 +73,11 @@ def build_source_db(path):
 
 
 def add_wallet_order(db_path, user_id, trade_no, status, provider, money=50.0, amount=100000,
-                     method=None):
+                     method=None, created=None):
     # method（真实支付类型）与 provider（网关名）故意可不同，如 wxpay + epay
     method = provider if method is None else method
     conn = sqlite3.connect(db_path)
-    now = int(time.time())
+    now = int(created or time.time())
     conn.execute(
         "INSERT INTO top_ups (user_id, amount, money, trade_no, payment_method, "
         "payment_provider, create_time, complete_time, status) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -219,6 +219,36 @@ def main():
     check(all("（补发推送）" in item["markdown"]["text"] for item in RECEIVED[before:]),
           "回溯的存量订单也标注补发推送")
     check(store2.get_state("initialized") == "1", "回溯后同样标记为已初始化")
+
+    print("\n11) 超时未支付：new-api 不会写 expired，改为按判定时长推导")
+    now = int(time.time())
+    add_wallet_order(db_path, 2, "TP-PENDING-STALE", "pending", "epay", method="wxpay",
+                     created=now - 40 * 60)
+    add_wallet_order(db_path, 2, "TP-PENDING-FRESH", "pending", "epay", method="wxpay",
+                     created=now - 5 * 60)
+    before = len(RECEIVED)
+    poller.run_once()
+    check(len(RECEIVED) - before == 1, "只有超过判定时长的那笔 pending 订单被推送")
+    text = RECEIVED[-1]["markdown"]["text"]
+    check("TP-PENDING-STALE" in text, "推送的是创建了 40 分钟的订单")
+    check("⏰ 充值超时" in text, "标题为充值超时")
+    check("下单后 30 分钟内未完成支付" in text, "原因写明判定时长")
+    check("来源：推导" in text, "来源标注为推导")
+    check("TP-PENDING-FRESH" not in text, "还在判定时长内的订单没有被推送")
+    latest = store.history(1)[0]
+    check(latest["reason_source"] == "derived", "推送历史里的来源记为推导")
+    check(latest["backfill"] == 0, "推导出的超时推送不带补发标记")
+
+    print("\n12) 超时判定可以关掉")
+    poller.run_once()
+    check(len(RECEIVED) - before == 1, "同一笔推导超时订单不重复推送")
+    store.set_configs({"expire_minutes": 0})
+    check(config_module.effective_config(store)["expire_minutes"] == 0, "配置能保存为 0")
+    add_wallet_order(db_path, 2, "TP-PENDING-STALE-2", "pending", "epay", method="wxpay",
+                     created=int(time.time()) - 40 * 60)
+    before = len(RECEIVED)
+    poller.run_once()
+    check(len(RECEIVED) == before, "expire_minutes=0 时不再推导超时")
 
     failed = [label for ok, label in CHECKS if not ok]
     print("\n" + "=" * 56)
