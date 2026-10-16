@@ -41,7 +41,7 @@ cd "$PROJECT_DIR"
 log_info "项目目录：$PROJECT_DIR"
 
 # 版本号用于在部署横幅和界面里确认“到底升没升上去”
-VERSION=$(git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+VERSION="1.0.0-aflin"
 log_info "当前版本：$VERSION"
 
 # ---------- 1. 环境检查 ----------

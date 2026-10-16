@@ -4,6 +4,7 @@
 金额倒序；统计窗口是本地时区的自然日（容器 TZ 见 docker-compose.yml）。
 """
 
+from datetime import date, timedelta
 import logging
 import threading
 import time
@@ -13,13 +14,22 @@ from notify import send_markdown
 from source import SourceDB
 
 STATE_KEY = "daily_report_last"
+WEEKLY_STATE_KEY = "weekly_report_last"
 MEDALS = ("🥇", "🥈", "🥉", "4️⃣", "5️⃣")
+
+
+def _local_date(now):
+    local = time.localtime(now)
+    return date(local.tm_year, local.tm_mon, local.tm_mday)
+
+
+def _date_midnight(day):
+    return int(time.mktime((day.year, day.month, day.day, 0, 0, 0, 0, 0, -1)))
 
 
 def _midnight(now):
     """当天 00:00 的时间戳。"""
-    local = time.localtime(now)
-    return int(time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1)))
+    return _date_midnight(_local_date(now))
 
 
 def day_window(now, offset_days=1):
@@ -31,14 +41,24 @@ def day_window(now, offset_days=1):
     if offset_days <= 0:
         local = time.localtime(now)
         return _midnight(now), int(now) + 1, time.strftime("%Y-%m-%d", local)
-    start = _midnight(now) - 86400 * offset_days
-    end = start + 86400
-    return start, end, time.strftime("%Y-%m-%d", time.localtime(start))
+    day = _local_date(now) - timedelta(days=offset_days)
+    return _date_midnight(day), _date_midnight(day + timedelta(days=1)), day.isoformat()
+
+
+def week_window(now, offset_weeks=1):
+    """上个完整自然周；offset_weeks=0 表示本周一至当前秒（含）。"""
+    today = _local_date(now)
+    monday = today - timedelta(days=today.weekday())
+    start_day = monday - timedelta(weeks=max(0, offset_weeks))
+    last_day = start_day + timedelta(days=6) if offset_weeks > 0 else today
+    end = _date_midnight(start_day + timedelta(days=7)) if offset_weeks > 0 else int(now) + 1
+    return _date_midnight(start_day), end, f"{start_day.isoformat()} ~ {last_day.isoformat()}"
 
 
 def seconds_until_midnight(now):
     """距离下一个 00:00 的秒数（至少 1 秒，避免忙等）。"""
-    return max(1, _midnight(now) + 86400 - int(now))
+    tomorrow = _local_date(now) + timedelta(days=1)
+    return max(1, _date_midnight(tomorrow) - int(now))
 
 
 def summarize(rows):
@@ -53,11 +73,13 @@ def _two_line(label, value):
     return f"**{label}**  \n{value}"
 
 
-def render_report(rows, names, label):
+def render_report(rows, names, label, weekly=False):
     """生成钉钉 markdown，返回 (标题, 正文)。rows 是 daily_recharge 的按用户汇总结果。"""
-    title = f"📊 每日充值统计（{label}）"
+    period = "每周" if weekly else "每日"
+    title = f"📊 {period}充值统计（{label}）"
     if not rows:
-        return title, f"### {title}\n\n当天没有成功充值"
+        empty = "本周没有成功充值" if weekly else "当天没有成功充值"
+        return title, f"### {title}\n\n{empty}"
 
     total, orders, users = summarize(rows)
     lines = [f"### {title}", ""]
@@ -90,56 +112,75 @@ class DailyReporter:
         ok 为真表示不必重试（已推送 / 之前推过 / 功能关闭）。force 供界面手动触发：
         不受开关与去重限制，也不写去重标记。overrides 是界面上还没保存的钉钉推送项。
         """
+        return self._run_report("daily", offset_days, force, overrides)
+
+    def run_weekly(self, offset_weeks=1, force=False, overrides=None):
+        """生成周报，手动推送与日报采用相同的覆盖和去重约定。"""
+        return self._run_report("weekly", offset_weeks, force, overrides)
+
+    def _run_report(self, kind, offset, force, overrides):
         config = config_module.apply_overrides(
             config_module.effective_config(self.store), overrides)
-        if not config["daily_report"] and not force:
-            self.log.info("每日充值统计推送已关闭，跳过")
+        state_key = WEEKLY_STATE_KEY if kind == "weekly" else STATE_KEY
+        if not config[f"{kind}_report"] and not force:
+            self.log.info("%s 充值统计推送已关闭，跳过", kind)
             return True, "已关闭"
         if not config["dingtalk_webhook"]:
             return False, "请先填写并保存钉钉 Webhook"
 
-        start, end, label = day_window(time.time(), offset_days)
-        if not force and self.store.get_state(STATE_KEY) == label:
-            self.log.info("日报 %s 已推送过，跳过", label)
+        window = week_window if kind == "weekly" else day_window
+        start, end, label = window(time.time(), offset)
+        if not force and self.store.get_state(state_key) == label:
+            self.log.info("%s %s 已推送过，跳过", kind, label)
             return True, "已推送过"
 
         source = SourceDB(config)
         rows = source.daily_recharge(start, end)
         names = source.usernames([row["user_id"] for row in rows])
-        title, text = render_report(rows, names, label)
+        title, text = render_report(rows, names, label, weekly=kind == "weekly")
         total, orders, users = summarize(rows)
         ok, detail = send_markdown(
             config["dingtalk_webhook"], title, text,
             secret=config["dingtalk_secret"], keyword=config["dingtalk_keyword"],
             at_mobiles=[m for m in (config["dingtalk_at_mobiles"] or "").split(",") if m.strip()],
         )
-        # 日报也记进推送记录，界面上能回看推没推成功
+        # 日报和周报分别记录，成功后才写各自的去重标记。
         self.store.add_history({
-            "kind": "daily", "trade_no": label, "status": "success" if ok else "failed",
+            "kind": kind, "trade_no": label, "status": "success" if ok else "failed",
             "money": total, "reason": f"{orders} 笔 / {users} 人",
-            "reason_source": "daily", "ok": ok, "detail": text,
+            "reason_source": kind, "ok": ok, "detail": text,
         })
         if ok:
             if not force:
-                self.store.set_state(STATE_KEY, label)
+                self.store.set_state(state_key, label)
             self.log.info("已推送 %s 的充值统计：%s 人", label, len(rows))
             return True, f"已推送 {label} 的充值统计（{len(rows)} 人）"
         self.log.warning("充值统计推送失败：%s", detail)
         return False, detail
 
+    def run_scheduled(self, now=None):
+        """午夜执行日报，周一另执行周报；每种报告独立重试至多三次。"""
+        pending = {"daily": self.run_daily}
+        if _local_date(time.time() if now is None else now).weekday() == 0:
+            pending["weekly"] = self.run_weekly
+        for attempt in range(3):
+            for kind, run in list(pending.items()):
+                if self._stop.is_set():
+                    return
+                try:
+                    ok, detail = run()
+                except Exception as exc:
+                    ok, detail = False, str(exc)
+                    self.log.exception("%s 充值统计推送出错：%s", kind, exc)
+                if ok:
+                    del pending[kind]
+                else:
+                    self.log.warning("%s 充值统计待重试：%s", kind, detail)
+            if not pending or attempt == 2 or self._stop.wait(60):
+                return
+
     def loop(self):
         while not self._stop.is_set():
             if self._stop.wait(seconds_until_midnight(time.time())):
                 return
-            # 到点后重试几次，避免一次网络抖动丢掉一整天的统计
-            for _ in range(3):
-                try:
-                    ok, detail = self.run_daily()
-                except Exception as exc:
-                    ok, detail = False, str(exc)
-                    self.log.exception("每日充值统计推送出错：%s", exc)
-                if ok:
-                    break
-                self.log.warning("每日充值统计待重试：%s", detail)
-                if self._stop.wait(60):
-                    return
+            self.run_scheduled()

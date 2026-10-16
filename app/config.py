@@ -5,6 +5,7 @@
 其余项在 Web 界面配置，保存在本程序自己的 SQLite 里。
 """
 
+import math
 import os
 import re
 
@@ -12,7 +13,7 @@ DATA_DIR = os.environ.get("DATA_DIR", "./data")
 UI_PORT = int(os.environ.get("UI_PORT", "8080"))
 UI_BIND = os.environ.get("UI_BIND", "0.0.0.0")
 # 由 deploy.sh 写入 .env，便于在界面确认当前跑的是哪个版本
-VERSION = os.environ.get("APP_VERSION", "").strip() or "unknown"
+VERSION = os.environ.get("APP_VERSION", "").strip() or "1.0.0-aflin"
 
 DEFAULTS = {
     # 钉钉自定义机器人
@@ -30,6 +31,8 @@ DEFAULTS = {
     "push_success": True,
     "push_failed": True,
     "push_expired": True,
+    "large_order_threshold": 50.0,
+    "min_push_amount": 0.0,
     # new-api 不会把超时未支付的订单写成 expired，这里按「创建后超过 N 分钟仍待支付」
     # 自行推导为超时；0 表示关闭该推导。订单判定与推送文案共用这一项，改一处两处同步生效
     "expire_minutes": 5,
@@ -39,6 +42,7 @@ DEFAULTS = {
     "lookback_hours": 48,
     # 每天 00:00 推送前一天的充值统计与排行榜
     "daily_report": True,
+    "weekly_report": True,
 }
 
 # 敏感项：界面只回显占位文案，提交该文案或空值时保持已保存的值
@@ -50,8 +54,10 @@ ENV_KEYS = ("db_type", "db_dsn", "sqlite_path", "poll_interval")
 BOOL_KEYS = {
     "enabled", "push_success", "push_failed",
     "push_expired", "scope_wallet", "scope_subscription", "backfill", "daily_report",
+    "weekly_report",
 }
 INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes"}
+FLOAT_KEYS = {"large_order_threshold", "min_push_amount"}
 STR_KEYS = {"dingtalk_webhook", "dingtalk_secret", "dingtalk_keyword",
             "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path"}
 
@@ -183,6 +189,14 @@ def coerce(key, value):
         except (TypeError, ValueError):
             raise ValueError(f"{key} 需要是整数") from None
         return number
+    if key in FLOAT_KEYS:
+        try:
+            number = float(str(value).strip())
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(f"{key} 需要是非负有限金额") from None
+        if not math.isfinite(number) or number < 0:
+            raise ValueError(f"{key} 需要是非负有限金额")
+        return number
     if key in STR_KEYS:
         return str(value).strip()
     return value
@@ -206,6 +220,11 @@ def validate(config):
         errors.append("回溯窗口不能小于 1 小时")
     if not 0 <= config["expire_minutes"] <= 10080:
         errors.append("超时判定分钟数需要在 0 ~ 10080 之间（0 表示关闭推导）")
+    for key in FLOAT_KEYS:
+        try:
+            coerce(key, config[key])
+        except ValueError as exc:
+            errors.append(str(exc))
     webhook = config["dingtalk_webhook"]
     if webhook and not webhook.startswith("https://"):
         # 仅本机回环地址放行 http，便于本地联调；其余必须是 https
