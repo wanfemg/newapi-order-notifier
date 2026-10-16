@@ -156,12 +156,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_auth():
             return
         if path == "/api/config":
-            stored = {k: v for k, v in self.server.store.config_map().items()
-                      if k in config_module.DEFAULTS}
+            current = config_module.effective_config(self.server.store)
             return self._json({
-                "config": config_module.effective_config(self.server.store),
-                "saved": stored,
-                "warnings": config_module.validate(config_module.effective_config(self.server.store)),
+                # 敏感项只回显掩码，真实值留在服务端
+                "config": config_module.mask_secrets(current),
+                "secrets": config_module.secret_flags(current),
+                "env_overridden": config_module.env_overrides(),
+                "warnings": config_module.validate(current),
             })
         if path == "/api/status":
             return self._json(self._status())
@@ -186,6 +187,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._test_dingtalk()
         if path == "/api/backfill":
             return self._backfill()
+        if path == "/api/daily-report":
+            return self._daily_report()
         if path == "/api/check":
             return self._check_source()
         if path == "/api/history/clear":
@@ -219,9 +222,13 @@ class Handler(BaseHTTPRequestHandler):
             if key not in config_module.DEFAULTS:
                 continue
             try:
-                values[key] = config_module.coerce(key, value)
+                coerced = config_module.coerce(key, value)
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
+            # 敏感项提交的是掩码或空值时说明用户没打算改，保持已保存的值
+            if key in config_module.SECRET_KEYS and coerced in ("", config_module.MASK):
+                continue
+            values[key] = coerced
         if not values:
             return self._json({"error": "没有可保存的配置项"}, 400)
         self.server.store.set_configs(values)
@@ -277,6 +284,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "请先填写并保存钉钉 Webhook"}, 400)
         count = self.server.poller.backfill(hours)
         return self._json({"ok": True, "count": count, "hours": hours})
+
+    def _daily_report(self):
+        """手动生成一份今天的充值统计（不受开关与去重限制），便于验证。"""
+        try:
+            ok, detail = self.server.reporter.run_daily(offset_days=0, force=True)
+        except Exception as exc:
+            return self._json({"ok": False, "detail": str(exc)}, 400)
+        return self._json({"ok": ok, "detail": detail}, 200 if ok else 400)
 
     # ---------- 基础设施 ----------
 
@@ -353,10 +368,15 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def serve(store, poller, bind, port):
+def build_server(store, poller, reporter, bind, port):
     server = Server((bind, port), Handler)
     server.store = store
     server.poller = poller
+    server.reporter = reporter
     server.sessions = Sessions()
     server.limiter = LoginLimiter()
-    server.serve_forever()
+    return server
+
+
+def serve(store, poller, reporter, bind, port):
+    build_server(store, poller, reporter, bind, port).serve_forever()

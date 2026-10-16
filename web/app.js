@@ -28,19 +28,21 @@ const FIELDS = {
     { key: 'expire_minutes', label: '超时未支付判定（分钟）', hint: 'new-api 不会把超时订单写成 expired，这里按「创建后超过 N 分钟仍待支付」推导为超时；0 表示关闭，N 建议与支付渠道的订单有效期一致' },
     { key: 'scope_wallet', label: '包含钱包充值', hint: 'top_ups 表订单' },
     { key: 'scope_subscription', label: '包含订阅订单', hint: 'subscription_orders 表订单' },
+    { key: 'daily_report', label: '每日充值统计推送', hint: '每天 00:00 统计前一天的充值并推送排行榜' },
     { key: 'backfill', label: '首次运行补推历史订单', hint: '默认关闭：首次只登记存量；补推的历史订单会标注「补发推送」' },
     { key: 'lookback_hours', label: '回溯窗口（小时）', hint: '每轮扫描最近 N 小时的订单' },
   ],
 };
 
-// 由环境变量注入、界面改不动的项（部署脚本写入 .env）
-const ENV_KEYS = ['db_type', 'db_dsn', 'sqlite_path', 'poll_interval'];
+// 敏感项：界面只显示掩码，留空提交表示保持已保存的值（掩码需与 config.py 的 MASK 一致）
+const SECRET_KEYS = new Set(['db_dsn', 'dingtalk_webhook', 'dingtalk_secret']);
+const MASK = '••••••••';
 
 const STATUS_TEXT = { success: '成功', failed: '失败', expired: '已过期' };
 const SOURCE_TEXT = { order: '订单数据', derived: '推导' };
 const BOOL_KEYS = new Set([
   'enabled', 'push_success', 'push_failed',
-  'push_expired', 'scope_wallet', 'scope_subscription', 'backfill',
+  'push_expired', 'scope_wallet', 'scope_subscription', 'backfill', 'daily_report',
 ]);
 const INT_KEYS = new Set(['poll_interval', 'lookback_hours', 'expire_minutes']);
 
@@ -151,25 +153,29 @@ function renderFields() {
   }
 }
 
-function fill(config, saved, defaults) {
+function fill(config, envOverridden, secrets) {
+  const overridden = new Set(envOverridden || []);
+  const hasSecret = secrets || {};
   for (const specs of Object.values(FIELDS)) {
     for (const spec of specs) {
       const input = inputs[spec.key];
-      const value = config[spec.key];
-      if (BOOL_KEYS.has(spec.key)) {
-        input.checked = Boolean(value);
+      const hint = input.closest('.field').querySelector('.hint, .switch .muted');
+      let text = spec.hint || '';
+
+      if (SECRET_KEYS.has(spec.key)) {
+        // 已保存的值不返回前端，只显示掩码；留空提交表示不修改
+        const savedFlag = Boolean(hasSecret[spec.key]);
+        input.value = savedFlag ? MASK : '';
+        input.placeholder = savedFlag ? '已保存，留空表示不修改' : '';
+      } else if (BOOL_KEYS.has(spec.key)) {
+        input.checked = Boolean(config[spec.key]);
       } else {
+        const value = config[spec.key];
         input.value = value === undefined || value === null ? '' : String(value);
       }
-      const overridden = ENV_KEYS.includes(spec.key)
-        && Object.prototype.hasOwnProperty.call(saved, spec.key)
-        && String(saved[spec.key]) !== String(value);
-      const hint = input.closest('.field').querySelector('.hint, .switch .muted');
-      if (hint) {
-        hint.textContent = overridden
-          ? `${spec.hint}（当前被环境变量覆盖）`
-          : (spec.hint || '');
-      }
+
+      if (overridden.has(spec.key)) text += '（当前被环境变量覆盖）';
+      if (hint) hint.textContent = text;
     }
   }
 }
@@ -179,6 +185,13 @@ function collect() {
   for (const specs of Object.values(FIELDS)) {
     for (const spec of specs) {
       const input = inputs[spec.key];
+      if (SECRET_KEYS.has(spec.key)) {
+        const raw = input.value.trim();
+        // 掩码或空值 = 用户没打算改，交给服务端保留原值
+        if (raw === '' || raw === MASK) continue;
+        values[spec.key] = raw;
+        continue;
+      }
       values[spec.key] = BOOL_KEYS.has(spec.key) ? input.checked : input.value.trim();
     }
   }
@@ -269,7 +282,7 @@ async function loadConfig() {
   const { ok, status, data } = await api('/api/config');
   if (status === 401) return showLogin();
   if (!ok) return setMessage('save-msg', `读取配置失败：${data.error || status}`, 'bad');
-  fill(data.config || {}, data.saved || {}, data.defaults);
+  fill(data.config || {}, data.env_overridden || [], data.secrets || {});
 }
 
 async function loadStatus() {
@@ -352,6 +365,13 @@ function bind() {
   $('refresh').addEventListener('click', () => {
     loadStatus();
     loadHistory();
+  });
+
+  $('daily').addEventListener('click', async () => {
+    setMessage('daily-msg', '统计中…');
+    const { ok, data } = await api('/api/daily-report', { method: 'POST' });
+    setMessage('daily-msg', ok ? `✅ ${data.detail || '已推送'}` : `❌ ${data.detail || '推送失败'}`,
+      ok ? 'ok' : 'bad');
   });
 
   $('clear').addEventListener('click', async () => {

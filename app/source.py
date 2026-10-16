@@ -185,6 +185,19 @@ class SourceDB:
                 row["expired_derived"] = True
         return rows
 
+    def daily_recharge(self, start_ts, end_ts):
+        """某个自然日窗口内的成功充值，按用户汇总（金额倒序）。
+
+        口径：只统计钱包充值 top_ups 的成功单，订阅订单不计入。
+        """
+        p = self.placeholder
+        return self._fetch(
+            "SELECT user_id, SUM(money) AS money, COUNT(*) AS orders FROM top_ups "
+            f"WHERE status = {p} AND create_time >= {p} AND create_time < {p} "
+            "GROUP BY user_id ORDER BY money DESC",
+            ("success", int(start_ts), int(end_ts)),
+        )
+
     def usernames(self, user_ids):
         ids = sorted({int(uid) for uid in user_ids if uid})
         if not ids:

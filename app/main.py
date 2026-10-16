@@ -10,6 +10,7 @@ import config as config_module
 import store as store_module
 import webui
 from poller import Poller
+from report import DailyReporter
 
 
 def main():
@@ -37,16 +38,20 @@ def main():
     except Exception as exc:
         log.warning("首次轮询未完成：%s", exc)
 
+    reporter = DailyReporter(store)
+
     import threading
     threading.Thread(target=poller.loop, name="poller", daemon=True).start()
+    threading.Thread(target=reporter.loop, name="daily-reporter", daemon=True).start()
 
     log.info("订单通知服务已启动，配置界面 http://%s:%s",
              config_module.UI_BIND, config_module.UI_PORT)
     try:
-        webui.serve(store, poller, config_module.UI_BIND, config_module.UI_PORT)
+        webui.serve(store, poller, reporter, config_module.UI_BIND, config_module.UI_PORT)
     except KeyboardInterrupt:
         log.info("收到退出信号，正在停止")
         poller.stop()
+        reporter.stop()
 
 
 if __name__ == "__main__":

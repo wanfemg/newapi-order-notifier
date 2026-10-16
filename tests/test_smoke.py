@@ -10,6 +10,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,7 +19,10 @@ sys.path.insert(0, os.path.join(BASE, "app"))
 
 import config as config_module  # noqa: E402
 import poller as poller_module  # noqa: E402
+import report as report_module  # noqa: E402
+import source as source_module  # noqa: E402
 import store as store_module  # noqa: E402
+import webui as webui_module  # noqa: E402
 from poller import pay_method_label, payload_reason  # noqa: E402
 
 RECEIVED = []
@@ -249,6 +254,142 @@ def main():
     before = len(RECEIVED)
     poller.run_once()
     check(len(RECEIVED) == before, "expire_minutes=0 时不再推导超时")
+
+    print("\n13) 每日充值统计：只算钱包成功单，按金额排行")
+    now = int(time.time())
+    add_wallet_order(db_path, 1, "DR-A", "success", "epay", money=100.0, method="wxpay")
+    add_wallet_order(db_path, 2, "DR-B", "success", "epay", money=300.0, method="wxpay")
+    add_wallet_order(db_path, 2, "DR-C", "success", "epay", money=50.0, method="wxpay")
+    add_wallet_order(db_path, 2, "DR-D", "failed", "epay", money=999.0, method="wxpay")
+    start, end, label = report_module.day_window(now, 0)
+    rows = source_module.SourceDB(config_module.effective_config(store)).daily_recharge(start, end)
+    check([row["user_id"] for row in rows] == [2, 1], "按金额倒序：bob(350) 在 alice(199) 前面")
+    check(float(rows[0]["money"]) == 350.0 and int(rows[0]["orders"]) == 2, "汇总同一用户的多笔成功单")
+    check(float(rows[1]["money"]) == 199.0, "只统计成功单，失败的 999 元不计入")
+    check(len(rows) == 2, "订阅订单不计入钱包充值统计")
+
+    reporter = report_module.DailyReporter(store)
+    before = len(RECEIVED)
+    ok, detail = reporter.run_daily(offset_days=0, force=True)
+    check(ok, f"手动触发日报推送（{detail}）")
+    check(len(RECEIVED) - before == 1, "日报只推送一条消息")
+    message = RECEIVED[-1]["markdown"]
+    check("📊 每日充值统计" in message["title"], "标题为每日充值统计")
+    check("**总充值**：¥549.00" in message["text"], "总金额为 549.00（成功单之和）")
+    check("**笔数**：4 笔" in message["text"], "笔数为 4")
+    check("**充值人数**：2 人" in message["text"], "人数为 2")
+    check("🥇 bob —— ¥350.00（2 笔）" in message["text"], "第一名是充值最多的 bob")
+    check("🥈 alice —— ¥199.00（2 笔）" in message["text"], "第二名是 alice")
+    check(store.get_state("daily_report_last") == "", "手动触发不写去重标记")
+
+    print("\n14) 定时日报：窗口是刚过去的一天，且不重复推送")
+    check(report_module.day_window(now, 1)[2] == time.strftime(
+        "%Y-%m-%d", time.localtime(report_module.day_window(now, 1)[0])), "日期标签取自窗口起始日")
+    yesterday = report_module.day_window(now, 1)[2]
+    check(yesterday != report_module.day_window(now, 0)[2], "定时窗口是前一天，手动窗口是今天")
+    check(report_module.day_window(now, 1)[1] - report_module.day_window(now, 1)[0] == 86400,
+          "定时窗口是完整的一天")
+    before = len(RECEIVED)
+    ok, detail = reporter.run_daily()
+    check(ok, f"定时日报推送成功（{detail}）")
+    check("当天没有成功充值" in RECEIVED[-1]["markdown"]["text"], "昨天没有充值也要给出说明")
+    check(store.get_state("daily_report_last") == yesterday, "定时推送写下去重标记")
+    before = len(RECEIVED)
+    ok, detail = reporter.run_daily()
+    check(ok and "已推送过" in detail and len(RECEIVED) == before, "同一天不重复推送日报")
+    check(report_module.seconds_until_midnight(now) > 0, "距离下一个 0 点为正数")
+
+    print("\n15) 敏感项掩码与环境变量覆盖")
+    masked = config_module.mask_secrets({
+        "db_dsn": "postgresql://u:p@h:5432/db", "dingtalk_webhook": "", "enabled": True})
+    check(masked["db_dsn"] == config_module.MASK, "SQL_DSN 回显为掩码")
+    check(masked["dingtalk_webhook"] == "", "空值仍回显为空串")
+    check(masked["enabled"] is True, "非敏感项不受掩码影响")
+    check(config_module.secret_flags({"db_dsn": "x", "dingtalk_webhook": ""})
+          == {"db_dsn": True, "dingtalk_webhook": False, "dingtalk_secret": False},
+          "secret_flags 标明哪些敏感项已有值")
+    check(config_module.MASK == "••••••••", "掩码常量与前端约定一致")
+    os.environ["SQL_DSN"] = "postgresql://u:p@h:5432/db"
+    try:
+        overridden = config_module.env_overrides()
+        check("db_dsn" in overridden and "db_type" in overridden, "SQL_DSN 覆盖项被识别")
+        check(config_module.effective_config(store)["db_dsn"].startswith("postgresql://"),
+              "环境变量优先于界面保存值")
+    finally:
+        os.environ.pop("SQL_DSN", None)
+    check(config_module.env_overrides() == [], "清理后没有残留的环境覆盖")
+
+    store.set_configs({"daily_report": False})
+    before = len(RECEIVED)
+    ok, detail = reporter.run_daily()
+    check(ok and "已关闭" in detail and len(RECEIVED) == before, "关闭开关后定时日报不推送")
+    check(config_module.effective_config(store)["daily_report"] is False, "开关能保存为关闭")
+
+    print("\n16) 界面接口：敏感项只回显掩码，留空提交不改动已保存的值")
+    password = "test-password-123"
+    webhook = f"http://127.0.0.1:{port}/robot/send"
+    store3 = store_module.Store(os.path.join(tmp, "notifier3.db"))
+    store3.set_configs({
+        "db_type": "sqlite", "sqlite_path": db_path, "dingtalk_webhook": webhook,
+        "dingtalk_secret": "SECRET-KEY-123456", "poll_interval": 10,
+    })
+    store3.set_admin_hash(webui_module.hash_password(password))
+    httpd = webui_module.build_server(
+        store3, poller, report_module.DailyReporter(store3), "127.0.0.1", 0)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def post(path, body):
+        request = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                        method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header(webui_module.CSRF_HEADER, webui_module.CSRF_VALUE)
+        if cookie:
+            request.add_header("Cookie", cookie)
+        return request
+
+    def call(request):
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+
+    cookie = ""
+    with urllib.request.urlopen(post("/api/login", {"password": password}), timeout=10) as resp:
+        cookie = resp.headers["Set-Cookie"].split(";")[0]
+
+    status_code, payload = call(urllib.request.Request(base + "/api/config",
+                                                       headers={"Cookie": cookie}))
+    check(status_code == 200, "登录后能读取配置")
+    check(payload["config"]["dingtalk_webhook"] == config_module.MASK, "Webhook 回显为掩码")
+    check(payload["config"]["dingtalk_secret"] == config_module.MASK, "加签密钥回显为掩码")
+    check(payload["config"]["poll_interval"] == 10, "非敏感项照样回显真实值")
+    check(payload["secrets"] == {"db_dsn": False, "dingtalk_webhook": True,
+                                 "dingtalk_secret": True}, "secrets 标明哪些敏感项已保存")
+    check(payload["env_overridden"] == [], "没有环境变量覆盖时列表为空")
+    check(not any(config_module.MASK == value for key, value in payload["config"].items()
+                  if key not in config_module.SECRET_KEYS), "掩码只出现在敏感项上")
+
+    status_code, payload = call(post("/api/config", {"config": {
+        "dingtalk_webhook": config_module.MASK, "dingtalk_secret": "",
+        "db_dsn": "", "poll_interval": 15}}))
+    check(status_code == 200 and payload.get("ok"), "提交掩码/空值不报错")
+    saved = store3.config_map()
+    check(saved["dingtalk_webhook"] == webhook, "掩码提交保持原 Webhook 不变")
+    check(saved["dingtalk_secret"] == "SECRET-KEY-123456", "留空提交保持原密钥不变")
+    check(saved["poll_interval"] == 15, "同一次提交里的其他项正常保存")
+
+    before = len(RECEIVED)
+    status_code, payload = call(post("/api/daily-report", {}))
+    check(status_code == 200 and payload["ok"], "界面能手动生成并推送今日统计")
+    check(len(RECEIVED) - before == 1
+          and "每日充值统计" in RECEIVED[-1]["markdown"]["title"], "推送的就是每日统计消息")
+
+    status_code, payload = call(post("/api/config",
+                                     {"config": {"dingtalk_webhook": "https://example.com/x"}}))
+    check(store3.config_map()["dingtalk_webhook"] == "https://example.com/x", "填了新值就覆盖")
+    httpd.shutdown()
 
     failed = [label for ok, label in CHECKS if not ok]
     print("\n" + "=" * 56)

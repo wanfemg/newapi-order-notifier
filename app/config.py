@@ -37,11 +37,19 @@ DEFAULTS = {
     "scope_subscription": True,
     "backfill": False,
     "lookback_hours": 48,
+    # 每天 00:00 推送前一天的充值统计与排行榜
+    "daily_report": True,
 }
+
+# 敏感项：界面只回显掩码，提交空值或掩码时保持已保存的值
+SECRET_KEYS = ("db_dsn", "dingtalk_webhook", "dingtalk_secret")
+MASK = "••••••••"
+# 由环境变量注入、界面改不动的项（deploy.sh 写入 .env）
+ENV_KEYS = ("db_type", "db_dsn", "sqlite_path", "poll_interval")
 
 BOOL_KEYS = {
     "enabled", "push_success", "push_failed",
-    "push_expired", "scope_wallet", "scope_subscription", "backfill",
+    "push_expired", "scope_wallet", "scope_subscription", "backfill", "daily_report",
 }
 INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes"}
 STR_KEYS = {"dingtalk_webhook", "dingtalk_secret", "dingtalk_keyword",
@@ -101,6 +109,38 @@ def effective_config(store):
         config["poll_interval"] = parse_duration(
             os.environ["POLL_INTERVAL"], config["poll_interval"])
     return config
+
+
+def mask_secrets(values):
+    """把敏感项的值换成掩码（原本就是空值的仍为空串），用于界面回显。"""
+    masked = dict(values)
+    for key in SECRET_KEYS:
+        if key in masked:
+            masked[key] = MASK if str(masked[key] or "").strip() else ""
+    return masked
+
+
+def secret_flags(values):
+    """敏感项是否已有真实值，界面据此提示「已保存，留空表示不修改」。"""
+    return {key: bool(str(values.get(key) or "").strip()) for key in SECRET_KEYS}
+
+
+def env_overrides():
+    """返回被环境变量覆盖的键，界面据此给出提示。
+
+    与 effective_config 的注入逻辑保持一致：只注入 SQL_DSN / SQLITE_PATH / POLL_INTERVAL。
+    """
+    keys = []
+    sql_dsn = os.environ.get("SQL_DSN", "").strip()
+    if sql_dsn:
+        keys.append("db_dsn")
+        if infer_db_type(sql_dsn):
+            keys.append("db_type")
+    if os.environ.get("SQLITE_PATH", "").strip():
+        keys.extend(("sqlite_path", "db_type"))
+    if os.environ.get("POLL_INTERVAL"):
+        keys.append("poll_interval")
+    return keys
 
 
 def coerce(key, value):
