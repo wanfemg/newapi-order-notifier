@@ -227,17 +227,18 @@ def main():
 
     print("\n11) 超时未支付：new-api 不会写 expired，改为按判定时长推导")
     now = int(time.time())
+    store.set_configs({"expire_minutes": 5})
     add_wallet_order(db_path, 2, "TP-PENDING-STALE", "pending", "epay", method="wxpay",
                      created=now - 40 * 60)
     add_wallet_order(db_path, 2, "TP-PENDING-FRESH", "pending", "epay", method="wxpay",
-                     created=now - 5 * 60)
+                     created=now - 60)
     before = len(RECEIVED)
     poller.run_once()
     check(len(RECEIVED) - before == 1, "只有超过判定时长的那笔 pending 订单被推送")
     text = RECEIVED[-1]["markdown"]["text"]
     check("TP-PENDING-STALE" in text, "推送的是创建了 40 分钟的订单")
     check("⏰ 充值超时" in text, "标题为充值超时")
-    check("下单后 30 分钟内未完成支付" in text, "原因写明判定时长")
+    check("下单后 5 分钟内未完成支付" in text, "原因写明判定时长")
     check("来源：推导" in text, "来源标注为推导")
     check("TP-PENDING-FRESH" not in text, "还在判定时长内的订单没有被推送")
     latest = store.history(1)[0]
@@ -256,12 +257,12 @@ def main():
     check(len(RECEIVED) == before, "expire_minutes=0 时不再推导超时")
 
     print("\n13) 每日充值统计：钱包 + 订阅成功单都算，按金额排行")
-    now = int(time.time())
     add_wallet_order(db_path, 1, "DR-A", "success", "epay", money=100.0, method="wxpay")
     add_wallet_order(db_path, 2, "DR-B", "success", "epay", money=300.0, method="wxpay")
     add_wallet_order(db_path, 2, "DR-C", "success", "epay", money=50.0, method="wxpay")
     add_wallet_order(db_path, 2, "DR-D", "failed", "epay", money=999.0, method="wxpay")
-    start, end, label = report_module.day_window(now, 0)
+    # 窗口在订单写入之后再取，避免跨秒时新订单被排他上界挡掉
+    start, end, label = report_module.day_window(time.time(), 0)
     rows = source_module.SourceDB(config_module.effective_config(store)).daily_recharge(start, end)
     check([row["user_id"] for row in rows] == [1, 2], "按金额倒序：alice(398) 在 bob(350) 前面")
     check(float(rows[0]["money"]) == 398.0 and int(rows[0]["orders"]) == 3,
@@ -396,6 +397,50 @@ def main():
                                      {"config": {"dingtalk_webhook": "https://example.com/x"}}))
     check(store3.config_map()["dingtalk_webhook"] == "https://example.com/x", "填了新值就覆盖")
     httpd.shutdown()
+
+    print("\n17) 未保存配置也能测试发送与手动统计（表单里的值即时生效）")
+    store4 = store_module.Store(os.path.join(tmp, "notifier4.db"))
+    store4.set_configs({"db_type": "sqlite", "sqlite_path": db_path})
+    store4.set_admin_hash(webui_module.hash_password(password))
+    httpd4 = webui_module.build_server(
+        store4, poller, report_module.DailyReporter(store4), "127.0.0.1", 0)
+    threading.Thread(target=httpd4.serve_forever, daemon=True).start()
+    base4 = f"http://127.0.0.1:{httpd4.server_address[1]}"
+    cookie4 = ""
+
+    def post4(path, body):
+        request = urllib.request.Request(base4 + path, data=json.dumps(body).encode(),
+                                         method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header(webui_module.CSRF_HEADER, webui_module.CSRF_VALUE)
+        if cookie4:
+            request.add_header("Cookie", cookie4)
+        return request
+
+    with urllib.request.urlopen(post4("/api/login", {"password": password}), timeout=10) as resp:
+        cookie4 = resp.headers["Set-Cookie"].split(";")[0]
+
+    before = len(RECEIVED)
+    status_code, payload = call(post4("/api/test", {}))
+    check(status_code == 400 and "Webhook" in payload.get("error", ""),
+          "没填也没保存 Webhook 时测试发送被拒（原问题现场）")
+
+    status_code, payload = call(post4("/api/test", {"config": {"dingtalk_webhook": webhook}}))
+    check(status_code == 200 and payload.get("ok"), "表单里未保存的 Webhook 也能测试发送")
+    check(len(RECEIVED) - before == 1 and "测试消息" in RECEIVED[-1]["markdown"]["title"],
+          "测试消息确实发出去了")
+    check(store4.config_map().get("dingtalk_webhook") is None, "即时测试不写入已保存配置")
+
+    before = len(RECEIVED)
+    status_code, payload = call(post4("/api/daily-report",
+                                      {"config": {"dingtalk_webhook": webhook}}))
+    check(status_code == 200 and payload.get("ok"), "表单里未保存的 Webhook 也能手动生成今日统计")
+    check(len(RECEIVED) - before == 1, "统计消息确实发出去了")
+
+    status_code, payload = call(post4("/api/test",
+                                      {"config": {"dingtalk_webhook": config_module.MASK}}))
+    check(status_code == 400, "占位文案不会被当成真实 Webhook 提交")
+    httpd4.shutdown()
 
     failed = [label for ok, label in CHECKS if not ok]
     print("\n" + "=" * 56)

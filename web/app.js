@@ -34,7 +34,8 @@ const FIELDS = {
   ],
 };
 
-// 敏感项：界面只显示占位文案，留空提交表示保持已保存的值（文案需与 config.py 的 MASK 一致）
+// 敏感项：已保存的值不回显到输入框，只显示浅色占位文案，输入新内容即消失
+// （文案需与 config.py 的 MASK 一致）
 const SECRET_KEYS = new Set(['db_dsn', 'dingtalk_webhook', 'dingtalk_secret']);
 const MASK = '内容被猫猫大王吃掉了';
 
@@ -163,10 +164,11 @@ function fill(config, envOverridden, secrets) {
       let text = spec.hint || '';
 
       if (SECRET_KEYS.has(spec.key)) {
-        // 已保存的值不返回前端，只显示占位文案；留空提交表示不修改
+        // 已保存的值不回显：用浅色 placeholder 提示，输入新内容时自动消失
         const savedFlag = Boolean(hasSecret[spec.key]);
-        input.value = savedFlag ? MASK : '';
-        input.placeholder = savedFlag ? '已保存，留空表示不修改' : '';
+        input.value = '';
+        input.placeholder = savedFlag ? MASK : '';
+        if (savedFlag) text += '（已保存，留空表示不修改）';
       } else if (BOOL_KEYS.has(spec.key)) {
         input.checked = Boolean(config[spec.key]);
       } else {
@@ -186,14 +188,24 @@ function collect() {
     for (const spec of specs) {
       const input = inputs[spec.key];
       if (SECRET_KEYS.has(spec.key)) {
+        // 敏感项：输入框为空 = 用户没打算改，交给服务端保留原值
         const raw = input.value.trim();
-        // 占位文案或空值 = 用户没打算改，交给服务端保留原值
         if (raw === '' || raw === MASK) continue;
         values[spec.key] = raw;
         continue;
       }
       values[spec.key] = BOOL_KEYS.has(spec.key) ? input.checked : input.value.trim();
     }
+  }
+  return values;
+}
+
+// 钉钉推送项：用于「测试发送 / 立即生成统计」，填了还没保存也能生效
+function dingtalkForm() {
+  const values = {};
+  for (const spec of FIELDS['group-dingtalk']) {
+    const input = inputs[spec.key];
+    if (input) values[spec.key] = input.value.trim();
   }
   return values;
 }
@@ -336,7 +348,9 @@ function bind() {
 
   $('test').addEventListener('click', async () => {
     setMessage('test-msg', '发送中…');
-    const { ok, data } = await api('/api/test', { method: 'POST' });
+    const { ok, data } = await api('/api/test', {
+      method: 'POST', body: { config: dingtalkForm() },
+    });
     setMessage('test-msg', ok ? `✅ ${data.detail || '发送成功'}` : `❌ ${data.error || data.detail || '发送失败'}`,
       ok ? 'ok' : 'bad');
   });
@@ -369,7 +383,9 @@ function bind() {
 
   $('daily').addEventListener('click', async () => {
     setMessage('daily-msg', '统计中…');
-    const { ok, data } = await api('/api/daily-report', { method: 'POST' });
+    const { ok, data } = await api('/api/daily-report', {
+      method: 'POST', body: { config: dingtalkForm() },
+    });
     setMessage('daily-msg', ok ? `✅ ${data.detail || '已推送'}` : `❌ ${data.detail || '推送失败'}`,
       ok ? 'ok' : 'bad');
   });

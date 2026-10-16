@@ -84,13 +84,14 @@ class DailyReporter:
     def stop(self):
         self._stop.set()
 
-    def run_daily(self, offset_days=1, force=False):
+    def run_daily(self, offset_days=1, force=False, overrides=None):
         """生成并推送一份日报。返回 (ok, detail)。
 
         ok 为真表示不必重试（已推送 / 之前推过 / 功能关闭）。force 供界面手动触发：
-        不受开关与去重限制，也不写去重标记。
+        不受开关与去重限制，也不写去重标记。overrides 是界面上还没保存的钉钉推送项。
         """
-        config = config_module.effective_config(self.store)
+        config = config_module.apply_overrides(
+            config_module.effective_config(self.store), overrides)
         if not config["daily_report"] and not force:
             self.log.info("每日充值统计推送已关闭，跳过")
             return True, "已关闭"

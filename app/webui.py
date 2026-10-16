@@ -236,7 +236,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "warnings": config_module.validate(current)})
 
     def _test_dingtalk(self):
-        config = config_module.effective_config(self.server.store)
+        config = config_module.apply_overrides(
+            config_module.effective_config(self.server.store), self._form_overrides())
         if not config["dingtalk_webhook"]:
             return self._json({"error": "请先填写并保存钉钉 Webhook"}, 400)
         text = (
@@ -288,10 +289,17 @@ class Handler(BaseHTTPRequestHandler):
     def _daily_report(self):
         """手动生成一份今天的充值统计（不受开关与去重限制），便于验证。"""
         try:
-            ok, detail = self.server.reporter.run_daily(offset_days=0, force=True)
+            ok, detail = self.server.reporter.run_daily(
+                offset_days=0, force=True, overrides=self._form_overrides())
         except Exception as exc:
             return self._json({"ok": False, "detail": str(exc)}, 400)
         return self._json({"ok": ok, "detail": detail}, 200 if ok else 400)
+
+    def _form_overrides(self):
+        """读请求体里的钉钉推送项，供测试发送 / 生成统计即时使用（未保存也生效）。"""
+        body = self._read_json() or {}
+        incoming = body.get("config") if isinstance(body.get("config"), dict) else body
+        return {key: incoming[key] for key in config_module.DINGTALK_KEYS if key in incoming}
 
     # ---------- 基础设施 ----------
 

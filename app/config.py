@@ -31,8 +31,8 @@ DEFAULTS = {
     "push_failed": True,
     "push_expired": True,
     # new-api 不会把超时未支付的订单写成 expired，这里按「创建后超过 N 分钟仍待支付」
-    # 自行推导为超时；0 表示关闭该推导
-    "expire_minutes": 30,
+    # 自行推导为超时；0 表示关闭该推导。订单判定与推送文案共用这一项，改一处两处同步生效
+    "expire_minutes": 5,
     "scope_wallet": True,
     "scope_subscription": True,
     "backfill": False,
@@ -123,6 +123,29 @@ def mask_secrets(values):
 def secret_flags(values):
     """敏感项是否已有真实值，界面据此提示「已保存，留空表示不修改」。"""
     return {key: bool(str(values.get(key) or "").strip()) for key in SECRET_KEYS}
+
+
+# 界面「测试发送」「立即生成统计」会用当前表单里的钉钉推送项做即时验证
+DINGTALK_KEYS = ("dingtalk_webhook", "dingtalk_secret", "dingtalk_keyword", "dingtalk_at_mobiles")
+
+
+def apply_overrides(config, overrides):
+    """把界面上还没保存的钉钉推送项合并进生效配置。
+
+    敏感项为空值或占位文案时继续用已保存的值；其余项直接采用表单里的值。
+    这样用户填了 Webhook 还没点保存，也能先测试发送 / 生成统计。
+    """
+    if not overrides:
+        return config
+    merged = dict(config)
+    for key in DINGTALK_KEYS:
+        if key not in overrides:
+            continue
+        text = str(overrides.get(key) or "").strip()
+        if key in SECRET_KEYS and text in ("", MASK):
+            continue
+        merged[key] = text
+    return merged
 
 
 def env_overrides():

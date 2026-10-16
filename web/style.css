@@ -60,6 +60,9 @@ input[type="text"], input[type="password"], input[type="number"], select {
 
 input:focus, select:focus { outline: 2px solid #2b3b5c; border-color: var(--primary); }
 
+/* 敏感项的占位文案：浅色提示，输入新内容时自动消失 */
+input::placeholder { color: var(--muted); opacity: .7; font-style: italic; }
+
 .switch { display: flex; align-items: center; gap: 8px; }
 .switch input { width: 16px; height: 16px; accent-color: var(--primary); }
 
