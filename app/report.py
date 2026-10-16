@@ -83,18 +83,20 @@ def render_report(rows, names, label, weekly=False):
 
     total, orders, users = summarize(rows)
     lines = [f"### {title}", ""]
-    for name, value in (("总充值", f"¥{total:,.2f}"), ("笔数", f"{orders} 笔"),
-                        ("充值人数", f"{users} 人")):
+    for name, value in (("💰 总充值", f"¥{total:,.2f}"), ("🧾 笔数", f"{orders} 笔"),
+                        ("👥 充值人数", f"{users} 人")):
         lines.append(_two_line(name, value))
         lines.append("")
-    lines.append("**充值排行前五名**")
+    lines.append("**🏆 充值排行前五名**")
+    lines.append("")
     for index, row in enumerate(rows[:5]):
         uid = int(row["user_id"])
         name = names.get(uid)
         who = f"{name}（ID {uid}）" if name else f"用户#{uid}"
-        lines.append(f"{MEDALS[index]} {who} —— ¥{float(row['money'] or 0):,.2f}"
-                     f"（{int(row['orders'] or 0)} 笔）")
-    return title, "\n".join(lines)
+        lines.append(_two_line(f"{MEDALS[index]} {who}",
+                               f"¥{float(row['money'] or 0):,.2f}（{int(row['orders'] or 0)} 笔）"))
+        lines.append("")
+    return title, "\n".join(lines).rstrip()
 
 
 class DailyReporter:

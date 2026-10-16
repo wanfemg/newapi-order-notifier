@@ -289,11 +289,18 @@ def main():
     check(len(RECEIVED) - before == 1, "日报只推送一条消息")
     message = RECEIVED[-1]["markdown"]
     check("📊 每日充值统计" in message["title"], "标题为每日充值统计")
-    check("**总充值**  \n¥748.00" in message["text"], "总充值 748.00，标签与数值各占一行")
-    check("**笔数**  \n5 笔" in message["text"], "笔数 5（含订阅开通）")
-    check("**充值人数**  \n2 人" in message["text"], "充值人数 2")
-    check("🥇 alice（ID 1） —— ¥398.00（3 笔）" in message["text"], "第一名显示用户名和 ID")
-    check("🥈 bob（ID 2） —— ¥350.00（2 笔）" in message["text"], "第二名显示用户名和 ID")
+    check("**💰 总充值**  \n¥748.00" in message["text"], "总充值 748.00，标签与数值各占一行")
+    check("**🧾 笔数**  \n5 笔" in message["text"], "笔数 5（含订阅开通）")
+    check("**👥 充值人数**  \n2 人" in message["text"], "充值人数 2")
+    check("**🏆 充值排行前五名**\n\n**🥇 alice（ID 1）**  \n¥398.00（3 笔）\n\n"
+          "**🥈 bob（ID 2）**  \n¥350.00（2 笔）" in message["text"],
+          "日报排行标题与每个用户独立成段，金额另起一行")
+    weekly_title, weekly_text = report_module.render_report(
+        rows, {1: "alice", 2: "bob"}, label, weekly=True)
+    check("每周充值统计" in weekly_title and
+          "**🏆 充值排行前五名**\n\n**🥇 alice（ID 1）**  \n¥398.00（3 笔）\n\n"
+          "**🥈 bob（ID 2）**  \n¥350.00（2 笔）" in weekly_text,
+          "周报排行也逐人分段显示")
     check(store.get_state("daily_report_last") == "", "手动触发不写去重标记")
     latest = store.history(1)[0]
     check(latest["kind"] == "daily" and latest["reason_source"] == "daily"
