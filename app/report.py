@@ -1,7 +1,7 @@
 """每日充值统计：每天 00:00 汇总前一天的充值，推送总金额与充值前五名。
 
-口径：只统计钱包充值（top_ups）里状态为 success 的订单，按用户汇总金额倒序，
-订阅订单不计入；统计窗口是本地时区的自然日（容器 TZ 见 docker-compose.yml）。
+口径：钱包充值（top_ups）与订阅开通（subscription_orders）的成功单都计入，按用户汇总
+金额倒序；统计窗口是本地时区的自然日（容器 TZ 见 docker-compose.yml）。
 """
 
 import logging
@@ -41,24 +41,36 @@ def seconds_until_midnight(now):
     return max(1, _midnight(now) + 86400 - int(now))
 
 
+def summarize(rows):
+    """汇总一天的成功充值，返回 (总金额, 笔数, 人数)。"""
+    return (sum(float(row["money"] or 0) for row in rows),
+            sum(int(row["orders"] or 0) for row in rows),
+            len(rows))
+
+
+def _two_line(label, value):
+    """标签一行、数值一行；行末两个空格是 markdown 硬换行，避免钉钉把两行并成一行。"""
+    return f"**{label}**  \n{value}"
+
+
 def render_report(rows, names, label):
     """生成钉钉 markdown，返回 (标题, 正文)。rows 是 daily_recharge 的按用户汇总结果。"""
     title = f"📊 每日充值统计（{label}）"
-    lines = [f"### {title}"]
     if not rows:
-        lines.append("- 当天没有成功充值")
-        return title, "\n".join(lines)
+        return title, f"### {title}\n\n当天没有成功充值"
 
-    total = sum(float(row["money"] or 0) for row in rows)
-    orders = sum(int(row["orders"] or 0) for row in rows)
-    lines.append(f"- **总充值**：¥{total:,.2f}")
-    lines.append(f"- **笔数**：{orders} 笔")
-    lines.append(f"- **充值人数**：{len(rows)} 人")
-    lines.append("")
+    total, orders, users = summarize(rows)
+    lines = [f"### {title}", ""]
+    for name, value in (("总充值", f"¥{total:,.2f}"), ("笔数", f"{orders} 笔"),
+                        ("充值人数", f"{users} 人")):
+        lines.append(_two_line(name, value))
+        lines.append("")
     lines.append("**充值排行前五名**")
     for index, row in enumerate(rows[:5]):
-        name = names.get(int(row["user_id"])) or f"用户#{row['user_id']}"
-        lines.append(f"{MEDALS[index]} {name} —— ¥{float(row['money'] or 0):,.2f}"
+        uid = int(row["user_id"])
+        name = names.get(uid)
+        who = f"{name}（ID {uid}）" if name else f"用户#{uid}"
+        lines.append(f"{MEDALS[index]} {who} —— ¥{float(row['money'] or 0):,.2f}"
                      f"（{int(row['orders'] or 0)} 笔）")
     return title, "\n".join(lines)
 
@@ -94,11 +106,18 @@ class DailyReporter:
         rows = source.daily_recharge(start, end)
         names = source.usernames([row["user_id"] for row in rows])
         title, text = render_report(rows, names, label)
+        total, orders, users = summarize(rows)
         ok, detail = send_markdown(
             config["dingtalk_webhook"], title, text,
             secret=config["dingtalk_secret"], keyword=config["dingtalk_keyword"],
             at_mobiles=[m for m in (config["dingtalk_at_mobiles"] or "").split(",") if m.strip()],
         )
+        # 日报也记进推送记录，界面上能回看推没推成功
+        self.store.add_history({
+            "kind": "daily", "trade_no": label, "status": "success" if ok else "failed",
+            "money": total, "reason": f"{orders} 笔 / {users} 人",
+            "reason_source": "daily", "ok": ok, "detail": text,
+        })
         if ok:
             if not force:
                 self.store.set_state(STATE_KEY, label)

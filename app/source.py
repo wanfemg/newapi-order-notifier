@@ -188,11 +188,15 @@ class SourceDB:
     def daily_recharge(self, start_ts, end_ts):
         """某个自然日窗口内的成功充值，按用户汇总（金额倒序）。
 
-        口径：只统计钱包充值 top_ups 的成功单，订阅订单不计入。
+        口径：钱包充值（top_ups）+ 订阅开通（subscription_orders）两条线的成功单都算，
+        失败 / 过期 / 待支付的订单不计入。
         """
         p = self.placeholder
+        wallet = "SELECT user_id, money, status, create_time FROM top_ups"
+        subscription = "SELECT user_id, money, status, create_time FROM subscription_orders"
         return self._fetch(
-            "SELECT user_id, SUM(money) AS money, COUNT(*) AS orders FROM top_ups "
+            f"SELECT user_id, SUM(money) AS money, COUNT(*) AS orders FROM "
+            f"({wallet} UNION ALL {subscription}) AS paid "
             f"WHERE status = {p} AND create_time >= {p} AND create_time < {p} "
             "GROUP BY user_id ORDER BY money DESC",
             ("success", int(start_ts), int(end_ts)),

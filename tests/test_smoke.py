@@ -255,7 +255,7 @@ def main():
     poller.run_once()
     check(len(RECEIVED) == before, "expire_minutes=0 时不再推导超时")
 
-    print("\n13) 每日充值统计：只算钱包成功单，按金额排行")
+    print("\n13) 每日充值统计：钱包 + 订阅成功单都算，按金额排行")
     now = int(time.time())
     add_wallet_order(db_path, 1, "DR-A", "success", "epay", money=100.0, method="wxpay")
     add_wallet_order(db_path, 2, "DR-B", "success", "epay", money=300.0, method="wxpay")
@@ -263,10 +263,11 @@ def main():
     add_wallet_order(db_path, 2, "DR-D", "failed", "epay", money=999.0, method="wxpay")
     start, end, label = report_module.day_window(now, 0)
     rows = source_module.SourceDB(config_module.effective_config(store)).daily_recharge(start, end)
-    check([row["user_id"] for row in rows] == [2, 1], "按金额倒序：bob(350) 在 alice(199) 前面")
-    check(float(rows[0]["money"]) == 350.0 and int(rows[0]["orders"]) == 2, "汇总同一用户的多笔成功单")
-    check(float(rows[1]["money"]) == 199.0, "只统计成功单，失败的 999 元不计入")
-    check(len(rows) == 2, "订阅订单不计入钱包充值统计")
+    check([row["user_id"] for row in rows] == [1, 2], "按金额倒序：alice(398) 在 bob(350) 前面")
+    check(float(rows[0]["money"]) == 398.0 and int(rows[0]["orders"]) == 3,
+          "钱包充值与订阅开通记在同一用户名下")
+    check(float(rows[1]["money"]) == 350.0, "只统计成功单，失败的 999 元不计入")
+    check(len(rows) == 2, "订阅失败单不进入排行")
 
     reporter = report_module.DailyReporter(store)
     before = len(RECEIVED)
@@ -275,12 +276,17 @@ def main():
     check(len(RECEIVED) - before == 1, "日报只推送一条消息")
     message = RECEIVED[-1]["markdown"]
     check("📊 每日充值统计" in message["title"], "标题为每日充值统计")
-    check("**总充值**：¥549.00" in message["text"], "总金额为 549.00（成功单之和）")
-    check("**笔数**：4 笔" in message["text"], "笔数为 4")
-    check("**充值人数**：2 人" in message["text"], "人数为 2")
-    check("🥇 bob —— ¥350.00（2 笔）" in message["text"], "第一名是充值最多的 bob")
-    check("🥈 alice —— ¥199.00（2 笔）" in message["text"], "第二名是 alice")
+    check("**总充值**  \n¥748.00" in message["text"], "总充值 748.00，标签与数值各占一行")
+    check("**笔数**  \n5 笔" in message["text"], "笔数 5（含订阅开通）")
+    check("**充值人数**  \n2 人" in message["text"], "充值人数 2")
+    check("🥇 alice（ID 1） —— ¥398.00（3 笔）" in message["text"], "第一名显示用户名和 ID")
+    check("🥈 bob（ID 2） —— ¥350.00（2 笔）" in message["text"], "第二名显示用户名和 ID")
     check(store.get_state("daily_report_last") == "", "手动触发不写去重标记")
+    latest = store.history(1)[0]
+    check(latest["kind"] == "daily" and latest["reason_source"] == "daily"
+          and latest["trade_no"] == label, "日报也记进推送记录")
+    check(float(latest["money"]) == 748.0 and latest["reason"] == "5 笔 / 2 人",
+          "推送记录里带上汇总金额与笔数")
 
     print("\n14) 定时日报：窗口是刚过去的一天，且不重复推送")
     check(report_module.day_window(now, 1)[2] == time.strftime(
@@ -299,16 +305,16 @@ def main():
     check(ok and "已推送过" in detail and len(RECEIVED) == before, "同一天不重复推送日报")
     check(report_module.seconds_until_midnight(now) > 0, "距离下一个 0 点为正数")
 
-    print("\n15) 敏感项掩码与环境变量覆盖")
+    print("\n15) 敏感项占位文案与环境变量覆盖")
     masked = config_module.mask_secrets({
         "db_dsn": "postgresql://u:p@h:5432/db", "dingtalk_webhook": "", "enabled": True})
-    check(masked["db_dsn"] == config_module.MASK, "SQL_DSN 回显为掩码")
+    check(masked["db_dsn"] == config_module.MASK, "SQL_DSN 回显为占位文案")
     check(masked["dingtalk_webhook"] == "", "空值仍回显为空串")
-    check(masked["enabled"] is True, "非敏感项不受掩码影响")
+    check(masked["enabled"] is True, "非敏感项不受影响")
     check(config_module.secret_flags({"db_dsn": "x", "dingtalk_webhook": ""})
           == {"db_dsn": True, "dingtalk_webhook": False, "dingtalk_secret": False},
           "secret_flags 标明哪些敏感项已有值")
-    check(config_module.MASK == "••••••••", "掩码常量与前端约定一致")
+    check(config_module.MASK == "内容被猫猫大王吃掉了", "占位文案与前端约定一致")
     os.environ["SQL_DSN"] = "postgresql://u:p@h:5432/db"
     try:
         overridden = config_module.env_overrides()
@@ -325,7 +331,7 @@ def main():
     check(ok and "已关闭" in detail and len(RECEIVED) == before, "关闭开关后定时日报不推送")
     check(config_module.effective_config(store)["daily_report"] is False, "开关能保存为关闭")
 
-    print("\n16) 界面接口：敏感项只回显掩码，留空提交不改动已保存的值")
+    print("\n16) 界面接口：敏感项只回显占位文案，留空提交不改动已保存的值")
     password = "test-password-123"
     webhook = f"http://127.0.0.1:{port}/robot/send"
     store3 = store_module.Store(os.path.join(tmp, "notifier3.db"))
@@ -362,21 +368,21 @@ def main():
     status_code, payload = call(urllib.request.Request(base + "/api/config",
                                                        headers={"Cookie": cookie}))
     check(status_code == 200, "登录后能读取配置")
-    check(payload["config"]["dingtalk_webhook"] == config_module.MASK, "Webhook 回显为掩码")
-    check(payload["config"]["dingtalk_secret"] == config_module.MASK, "加签密钥回显为掩码")
+    check(payload["config"]["dingtalk_webhook"] == config_module.MASK, "Webhook 回显为占位文案")
+    check(payload["config"]["dingtalk_secret"] == config_module.MASK, "加签密钥回显为占位文案")
     check(payload["config"]["poll_interval"] == 10, "非敏感项照样回显真实值")
     check(payload["secrets"] == {"db_dsn": False, "dingtalk_webhook": True,
                                  "dingtalk_secret": True}, "secrets 标明哪些敏感项已保存")
     check(payload["env_overridden"] == [], "没有环境变量覆盖时列表为空")
     check(not any(config_module.MASK == value for key, value in payload["config"].items()
-                  if key not in config_module.SECRET_KEYS), "掩码只出现在敏感项上")
+                  if key not in config_module.SECRET_KEYS), "占位文案只出现在敏感项上")
 
     status_code, payload = call(post("/api/config", {"config": {
         "dingtalk_webhook": config_module.MASK, "dingtalk_secret": "",
         "db_dsn": "", "poll_interval": 15}}))
-    check(status_code == 200 and payload.get("ok"), "提交掩码/空值不报错")
+    check(status_code == 200 and payload.get("ok"), "提交占位文案/空值不报错")
     saved = store3.config_map()
-    check(saved["dingtalk_webhook"] == webhook, "掩码提交保持原 Webhook 不变")
+    check(saved["dingtalk_webhook"] == webhook, "提交占位文案保持原 Webhook 不变")
     check(saved["dingtalk_secret"] == "SECRET-KEY-123456", "留空提交保持原密钥不变")
     check(saved["poll_interval"] == 15, "同一次提交里的其他项正常保存")
 

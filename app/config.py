@@ -41,9 +41,9 @@ DEFAULTS = {
     "daily_report": True,
 }
 
-# 敏感项：界面只回显掩码，提交空值或掩码时保持已保存的值
+# 敏感项：界面只回显占位文案，提交该文案或空值时保持已保存的值
 SECRET_KEYS = ("db_dsn", "dingtalk_webhook", "dingtalk_secret")
-MASK = "••••••••"
+MASK = "内容被猫猫大王吃掉了"
 # 由环境变量注入、界面改不动的项（deploy.sh 写入 .env）
 ENV_KEYS = ("db_type", "db_dsn", "sqlite_path", "poll_interval")
 
@@ -112,7 +112,7 @@ def effective_config(store):
 
 
 def mask_secrets(values):
-    """把敏感项的值换成掩码（原本就是空值的仍为空串），用于界面回显。"""
+    """把敏感项的值换成占位文案（原本就是空值的仍为空串），用于界面回显。"""
     masked = dict(values)
     for key in SECRET_KEYS:
         if key in masked:

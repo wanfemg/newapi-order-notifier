@@ -34,12 +34,12 @@ const FIELDS = {
   ],
 };
 
-// 敏感项：界面只显示掩码，留空提交表示保持已保存的值（掩码需与 config.py 的 MASK 一致）
+// 敏感项：界面只显示占位文案，留空提交表示保持已保存的值（文案需与 config.py 的 MASK 一致）
 const SECRET_KEYS = new Set(['db_dsn', 'dingtalk_webhook', 'dingtalk_secret']);
-const MASK = '••••••••';
+const MASK = '内容被猫猫大王吃掉了';
 
 const STATUS_TEXT = { success: '成功', failed: '失败', expired: '已过期' };
-const SOURCE_TEXT = { order: '订单数据', derived: '推导' };
+const SOURCE_TEXT = { order: '订单数据', derived: '推导', daily: '每日统计' };
 const BOOL_KEYS = new Set([
   'enabled', 'push_success', 'push_failed',
   'push_expired', 'scope_wallet', 'scope_subscription', 'backfill', 'daily_report',
@@ -163,7 +163,7 @@ function fill(config, envOverridden, secrets) {
       let text = spec.hint || '';
 
       if (SECRET_KEYS.has(spec.key)) {
-        // 已保存的值不返回前端，只显示掩码；留空提交表示不修改
+        // 已保存的值不返回前端，只显示占位文案；留空提交表示不修改
         const savedFlag = Boolean(hasSecret[spec.key]);
         input.value = savedFlag ? MASK : '';
         input.placeholder = savedFlag ? '已保存，留空表示不修改' : '';
@@ -187,7 +187,7 @@ function collect() {
       const input = inputs[spec.key];
       if (SECRET_KEYS.has(spec.key)) {
         const raw = input.value.trim();
-        // 掩码或空值 = 用户没打算改，交给服务端保留原值
+        // 占位文案或空值 = 用户没打算改，交给服务端保留原值
         if (raw === '' || raw === MASK) continue;
         values[spec.key] = raw;
         continue;

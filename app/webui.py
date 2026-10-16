@@ -158,7 +158,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             current = config_module.effective_config(self.server.store)
             return self._json({
-                # 敏感项只回显掩码，真实值留在服务端
+                # 敏感项只回显占位文案，真实值留在服务端
                 "config": config_module.mask_secrets(current),
                 "secrets": config_module.secret_flags(current),
                 "env_overridden": config_module.env_overrides(),
@@ -225,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
                 coerced = config_module.coerce(key, value)
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
-            # 敏感项提交的是掩码或空值时说明用户没打算改，保持已保存的值
+            # 敏感项提交的是占位文案或空值时说明用户没打算改，保持已保存的值
             if key in config_module.SECRET_KEYS and coerced in ("", config_module.MASK):
                 continue
             values[key] = coerced
