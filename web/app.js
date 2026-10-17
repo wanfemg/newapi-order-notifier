@@ -37,6 +37,13 @@ const FIELDS = {
     { key: 'backfill', label: '首次运行补推历史订单', hint: '默认关闭：首次只登记存量；补推的历史订单会标注「补发推送」' },
     { key: 'lookback_hours', label: '回溯窗口（小时）', hint: '每轮扫描最近 N 小时的订单' },
   ],
+  'group-consume': [
+    { key: 'rate_currency', label: '计价货币', hint: '消耗统计的计价货币，默认 CNY（1 rate_currency = X 额度）' },
+    { key: 'consume_enabled', label: '开启消耗统计自动通知', hint: '关闭后不按间隔推送消耗通知，仅保留界面查看与手动统计' },
+    { key: 'consume_interval', label: '消耗检查间隔（秒）', hint: '默认 600 秒，范围 10 ~ 86400' },
+    { key: 'consume_change_quota', label: '变动通知阈值（额度）', hint: '单次间隔内新增消耗额度达到该值触发「消耗变动」通知；0 表示关闭' },
+    { key: 'consume_threshold_quota', label: '累计阈值（额度）', hint: '累计消耗额度达到该值触发「达到阈值」通知并清零；0 表示关闭' },
+  ],
 };
 
 const SECRET_KEYS = new Set(['db_dsn', 'dingtalk_webhook', 'dingtalk_secret']);
@@ -47,8 +54,10 @@ const BUCKET_TEXT = { success: '成功', failed: '失败' };
 const BOOL_KEYS = new Set([
   'enabled', 'push_success', 'push_failed',
   'push_expired', 'scope_wallet', 'scope_subscription', 'backfill', 'daily_report', 'weekly_report',
+  'consume_enabled',
 ]);
-const INT_KEYS = new Set(['poll_interval', 'lookback_hours', 'expire_minutes']);
+const INT_KEYS = new Set(['poll_interval', 'lookback_hours', 'expire_minutes',
+  'consume_interval', 'consume_threshold_quota', 'consume_change_quota']);
 const DECIMAL_KEYS = new Set(['large_order_threshold', 'min_push_amount']);
 
 const $ = (id) => document.getElementById(id);
@@ -68,6 +77,11 @@ let historyRequest = 0;
 let reportsRequest = 0;
 let reportsBuilt = false;
 let userSearch = '';
+let ratesBuilt = false;
+let ratesRequest = 0;
+let consumptionBuilt = false;
+let consumptionRequest = 0;
+let channelsRequest = 0;
 
 /* ---------- 工具 ---------- */
 
@@ -105,6 +119,19 @@ function formatTime(seconds) {
 function empty(root, text) {
   root.textContent = '';
   root.appendChild(el('div', 'empty', text || '暂无数据'));
+}
+
+function fmtMoney(value, currency) {
+  let n = Number(value);
+  if (!Number.isFinite(n)) n = 0;
+  const text = n.toLocaleString('zh-CN', { maximumFractionDigits: 6 });
+  return currency ? `${text} ${currency}` : text;
+}
+
+function fmtRate(rate) {
+  const n = Number(rate);
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  return '1:' + fmtMoney(rate);
 }
 
 /* ---------- 请求 ---------- */
@@ -193,7 +220,7 @@ function buildRange() {
     btn.addEventListener('click', () => {
       currentRange = Number(days);
       for (const b of wrap.querySelectorAll('button')) b.classList.toggle('on', b.textContent === label);
-      if (!['settings', 'reports'].includes(currentRoute())) renderCurrent();
+      if (!['settings', 'reports', 'rates'].includes(currentRoute())) renderCurrent();
     });
     wrap.appendChild(btn);
   }
@@ -203,13 +230,13 @@ function buildRange() {
 
 function currentRoute() {
   const route = location.hash.replace(/^#\//, '');
-  return ['overview', 'orders', 'ranking', 'users', 'reports', 'settings'].includes(route) ? route : 'overview';
+  return ['overview', 'orders', 'ranking', 'users', 'rates', 'consumption', 'reports', 'settings'].includes(route) ? route : 'overview';
 }
 
 function renderCurrent() {
   pageVersion++;
   const view = currentRoute();
-  $('range').classList.toggle('hidden', ['settings', 'reports'].includes(view));
+  $('range').classList.toggle('hidden', ['settings', 'reports', 'rates'].includes(view));
   document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
   const target = $('view-' + view);
   if (!target) return;
@@ -219,6 +246,8 @@ function renderCurrent() {
   else if (view === 'orders') renderOrders();
   else if (view === 'ranking') renderRanking();
   else if (view === 'users') renderUsers();
+  else if (view === 'rates') renderRates();
+  else if (view === 'consumption') renderConsumption();
   else if (view === 'reports') renderReports();
   else if (view === 'settings') renderSettings();
 }
@@ -640,6 +669,408 @@ function renderUserRows(body, count, items, query) {
   }
 }
 
+/* ---------- 汇率配置 ---------- */
+
+function rateField(id, labelText, placeholder, hint) {
+  const field = el('div', 'field');
+  const label = el('label', '', labelText);
+  label.htmlFor = id;
+  const input = el('input');
+  input.id = id;
+  input.placeholder = placeholder || '';
+  input.autocomplete = 'off';
+  field.appendChild(label);
+  field.appendChild(input);
+  field.appendChild(el('span', 'hint', hint || ''));
+  return field;
+}
+
+function buildRates() {
+  const root = $('view-rates');
+  root.textContent = '';
+
+  const formCard = el('div', 'card glass');
+  formCard.appendChild(el('h3', '', '汇率配置'));
+  formCard.appendChild(el('p', 'muted', '汇率语义：1 单位计价货币 = X 站点额度。例如「1:7」表示 1 元人民币可兑换 7 个站点额度。修改后消耗统计立即使用最新汇率，历史汇率自动保留用于对账。'));
+  const grid = el('div', 'grid');
+  grid.appendChild(rateField('rate-currency', '货币种类', '如 CNY / USD', '自定义货币种类，如 CNY、USD、HKD'));
+  grid.appendChild(rateField('rate-value', '汇率规则', '1:7 或 7', '支持「1:X」格式或直接填数字'));
+  grid.appendChild(rateField('rate-note', '备注（可选）', '本次调整原因', '保存后会写入汇率调整历史'));
+  formCard.appendChild(grid);
+  const actions = el('div', 'actions');
+  const saveBtn = el('button', 'btn primary', '保存汇率');
+  saveBtn.id = 'rate-save';
+  actions.appendChild(saveBtn);
+  const msg = el('span', 'muted', '');
+  msg.id = 'rate-msg';
+  msg.setAttribute('role', 'status');
+  actions.appendChild(msg);
+  formCard.appendChild(actions);
+  root.appendChild(formCard);
+
+  const currentCard = el('div', 'card glass');
+  currentCard.appendChild(el('h3', '', '当前汇率'));
+  const currentWrap = el('div', 'table-wrap');
+  currentWrap.tabIndex = 0;
+  currentWrap.setAttribute('aria-label', '当前汇率表');
+  const currentTable = el('table');
+  const currentHead = el('thead');
+  const currentHeadRow = el('tr');
+  for (const text of ['货币种类', '汇率', '更新时间']) currentHeadRow.appendChild(el('th', '', text));
+  currentHead.appendChild(currentHeadRow);
+  currentTable.appendChild(currentHead);
+  const currentBody = el('tbody');
+  currentBody.id = 'rates-current';
+  currentTable.appendChild(currentBody);
+  currentWrap.appendChild(currentTable);
+  currentCard.appendChild(currentWrap);
+  root.appendChild(currentCard);
+
+  const historyCard = el('div', 'card glass');
+  historyCard.appendChild(el('h3', '', '汇率调整历史'));
+  const historyWrap = el('div', 'table-wrap');
+  historyWrap.tabIndex = 0;
+  historyWrap.setAttribute('aria-label', '汇率调整历史表');
+  const historyTable = el('table');
+  const historyHead = el('thead');
+  const historyHeadRow = el('tr');
+  for (const text of ['时间', '货币', '旧汇率', '新汇率', '备注']) historyHeadRow.appendChild(el('th', '', text));
+  historyHead.appendChild(historyHeadRow);
+  historyTable.appendChild(historyHead);
+  const historyBody = el('tbody');
+  historyBody.id = 'rates-history';
+  historyTable.appendChild(historyBody);
+  historyWrap.appendChild(historyTable);
+  historyCard.appendChild(historyWrap);
+  root.appendChild(historyCard);
+
+  bindBusyAction('rate-save', 'rate-msg', async () => {
+    const currency = $('rate-currency').value.trim();
+    const rate = $('rate-value').value.trim();
+    const note = $('rate-note').value.trim();
+    if (!currency) return setMessage('rate-msg', '请填写货币种类', 'bad');
+    if (!rate) return setMessage('rate-msg', '请填写汇率规则', 'bad');
+    const version = pageVersion;
+    setMessage('rate-msg', '保存中…');
+    const res = await api('/api/rates', { method: 'POST', body: { currency, rate, note } });
+    if (version !== pageVersion) return;
+    if (res.status === 401) return showLogin();
+    if (!res.ok) return setMessage('rate-msg', res.data.error || '保存失败', 'bad');
+    if (res.data.changed && !res.data.notified) setMessage('rate-msg', '已保存，但钉钉通知未成功', 'bad');
+    else if (res.data.changed) setMessage('rate-msg', '已保存并推送钉钉通知', 'ok');
+    else setMessage('rate-msg', '已保存（汇率未变化）', 'ok');
+    $('rate-value').value = '';
+    $('rate-note').value = '';
+    await loadRates();
+  });
+
+  ratesBuilt = true;
+}
+
+async function loadRates() {
+  const request = ++ratesRequest;
+  const version = pageVersion;
+  const { ok, status, data } = await api('/api/rates');
+  if (request !== ratesRequest || version !== pageVersion) return;
+  if (status === 401) return showLogin();
+  if (!ok) return setMessage('rate-msg', data.error || '读取汇率失败', 'bad');
+  const currencyInput = $('rate-currency');
+  if (currencyInput && !currencyInput.value.trim()) currencyInput.value = data.currency || 'CNY';
+  renderRatesCurrent(data.rates || []);
+  renderRatesHistory(data.history || []);
+}
+
+function renderRatesCurrent(rates) {
+  const body = $('rates-current');
+  if (!body) return;
+  body.textContent = '';
+  if (!rates.length) {
+    const row = el('tr');
+    const td = el('td', 'muted', '暂无汇率，请在上方配置');
+    td.colSpan = 3;
+    row.appendChild(td);
+    body.appendChild(row);
+    return;
+  }
+  for (const item of rates) {
+    const row = el('tr');
+    row.appendChild(el('td', '', item.currency));
+    row.appendChild(el('td', 'num', fmtRate(item.rate)));
+    row.appendChild(el('td', '', formatTime(item.updated_at)));
+    body.appendChild(row);
+  }
+}
+
+function renderRatesHistory(history) {
+  const body = $('rates-history');
+  if (!body) return;
+  body.textContent = '';
+  if (!history.length) {
+    const row = el('tr');
+    const td = el('td', 'muted', '暂无调整记录');
+    td.colSpan = 5;
+    row.appendChild(td);
+    body.appendChild(row);
+    return;
+  }
+  for (const item of history) {
+    const row = el('tr');
+    row.appendChild(el('td', '', formatTime(item.changed_at)));
+    row.appendChild(el('td', '', item.currency));
+    row.appendChild(el('td', 'num', fmtRate(item.old_rate)));
+    row.appendChild(el('td', 'num', fmtRate(item.new_rate)));
+    row.appendChild(el('td', '', item.note || '-'));
+    body.appendChild(row);
+  }
+}
+
+async function renderRates() {
+  if (!ratesBuilt) buildRates();
+  await loadRates();
+}
+
+/* ---------- 消耗统计 ---------- */
+
+function buildConsumption() {
+  const root = $('view-consumption');
+  root.textContent = '';
+
+  const notice = el('p', 'muted', '');
+  notice.id = 'consumption-msg';
+  notice.setAttribute('role', 'status');
+  root.appendChild(notice);
+
+  const kpis = el('div', 'kpi-grid');
+  kpis.id = 'consumption-kpis';
+  root.appendChild(kpis);
+
+  const costCard = el('div', 'card glass');
+  costCard.appendChild(el('h3', '', '渠道成本单价配置'));
+  costCard.appendChild(el('p', 'muted', '配置每个上游渠道每 1 额度的实际成本，用于统计上游渠道成本；货币默认 CNY，成本单价留空表示不计入成本。'));
+  const costWrap = el('div', 'table-wrap');
+  costWrap.tabIndex = 0;
+  costWrap.setAttribute('aria-label', '渠道成本单价配置表');
+  const costTable = el('table');
+  const costHead = el('thead');
+  const costHeadRow = el('tr');
+  for (const text of ['渠道', '名称', '类型', '成本单价', '货币', '操作']) costHeadRow.appendChild(el('th', '', text));
+  costHead.appendChild(costHeadRow);
+  costTable.appendChild(costHead);
+  const costBody = el('tbody');
+  costBody.id = 'cost-channels';
+  costTable.appendChild(costBody);
+  costWrap.appendChild(costTable);
+  costCard.appendChild(costWrap);
+  root.appendChild(costCard);
+
+  const channelCard = el('div', 'card glass');
+  channelCard.appendChild(el('h3', '', '上游渠道成本明细'));
+  const channelWrap = el('div', 'table-wrap');
+  channelWrap.tabIndex = 0;
+  channelWrap.setAttribute('aria-label', '上游渠道成本明细表');
+  const channelTable = el('table');
+  const channelHead = el('thead');
+  const channelHeadRow = el('tr');
+  for (const text of ['渠道', '消耗额度', '成本']) channelHeadRow.appendChild(el('th', '', text));
+  channelHead.appendChild(channelHeadRow);
+  channelTable.appendChild(channelHead);
+  const channelBody = el('tbody');
+  channelBody.id = 'consumption-channels';
+  channelTable.appendChild(channelBody);
+  channelWrap.appendChild(channelTable);
+  channelCard.appendChild(channelWrap);
+  root.appendChild(channelCard);
+
+  const userCard = el('div', 'card glass');
+  userCard.appendChild(el('h3', '', '用户消耗排行'));
+  const userWrap = el('div', 'table-wrap');
+  userWrap.tabIndex = 0;
+  userWrap.setAttribute('aria-label', '用户消耗排行表');
+  const userTable = el('table');
+  const userHead = el('thead');
+  const userHeadRow = el('tr');
+  for (const text of ['用户', '消耗额度', '消耗金额']) userHeadRow.appendChild(el('th', '', text));
+  userHead.appendChild(userHeadRow);
+  userTable.appendChild(userHead);
+  const userBody = el('tbody');
+  userBody.id = 'consumption-users';
+  userTable.appendChild(userBody);
+  userWrap.appendChild(userTable);
+  userCard.appendChild(userWrap);
+  root.appendChild(userCard);
+
+  consumptionBuilt = true;
+}
+
+async function renderConsumption() {
+  if (!consumptionBuilt) buildConsumption();
+  await Promise.all([loadConsumption(), loadChannels()]);
+}
+
+async function loadConsumption() {
+  const request = ++consumptionRequest;
+  const version = pageVersion;
+  setMessage('consumption-msg', '加载中…');
+  const { ok, status, data } = await api(`/api/consumption?days=${currentRange}`);
+  if (request !== consumptionRequest || version !== pageVersion) return;
+  if (status === 401) return showLogin();
+  if (!ok) {
+    setMessage('consumption-msg', data.error || '读取消耗统计失败', 'bad');
+    const kpis = $('consumption-kpis');
+    if (kpis) empty(kpis, '加载失败');
+    return;
+  }
+  setMessage('consumption-msg', data.has_rate ? '' : '尚未配置汇率，用户消耗金额无法计算。请先前往「汇率配置」设置汇率。');
+  renderConsumptionKpis(data);
+  renderConsumptionChannels(data.channels || []);
+  renderConsumptionUsers(data.users || [], data.currency || 'CNY');
+}
+
+function renderConsumptionKpis(data) {
+  const kpis = $('consumption-kpis');
+  if (!kpis) return;
+  kpis.textContent = '';
+  const currency = data.currency || 'CNY';
+  const rateText = data.has_rate ? '1:' + fmtMoney(data.rate) : '-';
+  kpis.appendChild(kpi('消耗额度', fmtCompact(data.quota), `近 ${currentRange} 天`));
+  kpis.appendChild(kpi('用户消耗金额', data.has_rate ? fmtMoney(data.user_money, currency) : '-', `汇率 1 ${currency} = ${data.has_rate ? fmtMoney(data.rate) : '?'} 额度`, true));
+  kpis.appendChild(kpi('上游渠道成本', fmtMoney(data.upstream_cost), '按已配置渠道成本单价汇总'));
+  kpis.appendChild(kpi('当前汇率', rateText, `1 ${currency} = X 额度`));
+}
+
+function renderConsumptionChannels(channels) {
+  const body = $('consumption-channels');
+  if (!body) return;
+  body.textContent = '';
+  if (!channels.length) {
+    const row = el('tr');
+    const td = el('td', 'muted', '暂无消耗数据');
+    td.colSpan = 3;
+    row.appendChild(td);
+    body.appendChild(row);
+    return;
+  }
+  for (const item of channels) {
+    const row = el('tr');
+    row.appendChild(el('td', '', item.name || `渠道#${item.channel_id}`));
+    row.appendChild(el('td', 'num', fmtCompact(item.quota)));
+    row.appendChild(el('td', 'num', fmtMoney(item.cost, item.cost_currency)));
+    body.appendChild(row);
+  }
+}
+
+function renderConsumptionUsers(users, currency) {
+  const body = $('consumption-users');
+  if (!body) return;
+  body.textContent = '';
+  if (!users.length) {
+    const row = el('tr');
+    const td = el('td', 'muted', '暂无消耗数据');
+    td.colSpan = 3;
+    row.appendChild(td);
+    body.appendChild(row);
+    return;
+  }
+  for (const item of users) {
+    const row = el('tr');
+    row.appendChild(el('td', '', item.username || `用户#${item.user_id}`));
+    row.appendChild(el('td', 'num', fmtCompact(item.quota)));
+    row.appendChild(el('td', 'num', fmtMoney(item.money, currency)));
+    body.appendChild(row);
+  }
+}
+
+async function loadChannels() {
+  const request = ++channelsRequest;
+  const version = pageVersion;
+  const { ok, status, data } = await api('/api/channels');
+  if (request !== channelsRequest || version !== pageVersion) return;
+  if (status === 401) return showLogin();
+  if (!ok) {
+    const body = $('cost-channels');
+    if (body) {
+      body.textContent = '';
+      const row = el('tr');
+      const td = el('td', 'muted', data.error || '读取渠道失败');
+      td.colSpan = 6;
+      row.appendChild(td);
+      body.appendChild(row);
+    }
+    return;
+  }
+  renderChannelCosts(data.channels || []);
+}
+
+function renderChannelCosts(channels) {
+  const body = $('cost-channels');
+  if (!body) return;
+  body.textContent = '';
+  if (!channels.length) {
+    const row = el('tr');
+    const td = el('td', 'muted', '未读取到渠道，请确认 new-api 数据源已正确连接');
+    td.colSpan = 6;
+    row.appendChild(td);
+    body.appendChild(row);
+    return;
+  }
+  for (const ch of channels) {
+    const row = el('tr');
+    row.appendChild(el('td', 'muted', `#${ch.id}`));
+    row.appendChild(el('td', '', ch.name || `渠道#${ch.id}`));
+    row.appendChild(el('td', 'muted', String(ch.type || '-')));
+
+    const costCell = el('td');
+    const costInput = el('input');
+    costInput.type = 'text';
+    costInput.inputMode = 'decimal';
+    costInput.value = ch.cost_per_unit || '';
+    costInput.placeholder = '如 0.001';
+    costInput.autocomplete = 'off';
+    costCell.appendChild(costInput);
+    row.appendChild(costCell);
+
+    const curCell = el('td');
+    const curInput = el('input');
+    curInput.type = 'text';
+    curInput.value = ch.cost_currency || 'CNY';
+    curInput.autocomplete = 'off';
+    curCell.appendChild(curInput);
+    row.appendChild(curCell);
+
+    const actionCell = el('td', 'actions');
+    const saveBtn = el('button', 'btn small', '保存');
+    const clearBtn = el('button', 'btn small ghost', '清除');
+    saveBtn.addEventListener('click', () => saveChannelCost(ch.id, costInput, curInput));
+    clearBtn.addEventListener('click', () => deleteChannelCost(ch.id));
+    actionCell.appendChild(saveBtn);
+    actionCell.appendChild(clearBtn);
+    row.appendChild(actionCell);
+    body.appendChild(row);
+  }
+}
+
+async function saveChannelCost(channelId, costInput, curInput) {
+  const cost = costInput.value.trim();
+  if (!cost) return setMessage('consumption-msg', '请填写成本单价', 'bad');
+  const version = pageVersion;
+  const res = await api('/api/cost', { method: 'POST', body: { channel_id: channelId, cost_per_unit: cost, cost_currency: curInput.value.trim() || 'CNY' } });
+  if (version !== pageVersion) return;
+  if (res.status === 401) return showLogin();
+  if (!res.ok) return setMessage('consumption-msg', res.data.error || '保存成本失败', 'bad');
+  setMessage('consumption-msg', '渠道成本已保存', 'ok');
+  await Promise.all([loadChannels(), loadConsumption()]);
+}
+
+async function deleteChannelCost(channelId) {
+  const version = pageVersion;
+  const res = await api('/api/cost/delete', { method: 'POST', body: { channel_id: channelId } });
+  if (version !== pageVersion) return;
+  if (res.status === 401) return showLogin();
+  if (!res.ok) return setMessage('consumption-msg', res.data.error || '清除成本失败', 'bad');
+  setMessage('consumption-msg', '渠道成本已清除', 'ok');
+  await Promise.all([loadChannels(), loadConsumption()]);
+}
+
 /* ---------- 报表与推送 ---------- */
 
 async function renderReports() {
@@ -854,6 +1285,15 @@ function buildSettings() {
   for (const spec of FIELDS['group-push']) pushGrid.appendChild(buildField(spec));
   push.appendChild(pushGrid);
   root.appendChild(push);
+
+  const consume = el('div', 'card glass');
+  consume.appendChild(el('h3', '', '消耗统计通知'));
+  consume.appendChild(el('div', 'muted', '只读 new-api 消耗日志，按间隔统计并推送消耗变动 / 达到阈值通知；汇率与成本单价在左侧「汇率配置 / 消耗统计」里设置。'));
+  const consumeGrid = el('div', 'grid');
+  consumeGrid.id = 'group-consume';
+  for (const spec of FIELDS['group-consume']) consumeGrid.appendChild(buildField(spec));
+  consume.appendChild(consumeGrid);
+  root.appendChild(consume);
 
   const backfill = el('div', 'card glass');
   backfill.appendChild(el('h3', '', '推送补发'));

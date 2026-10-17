@@ -294,3 +294,25 @@ class SourceDB:
         except Exception:
             return {}  # 老版本库可能还没有 subscription_plans 表
         return {int(row["id"]): (row.get("title") or "") for row in rows}
+
+    def channels(self):
+        """只读渠道列表（id/name/type/models/status），供渠道成本单价配置用。"""
+        try:
+            return self._fetch(
+                "SELECT id, name, type, models, status FROM channels ORDER BY id", ())
+        except Exception:
+            return []  # 老版本库可能还没有 channels 表
+
+    def consumption(self, start_ts, end_ts):
+        """窗口内消耗日志按 (user_id, channel_id) 汇总 quota 与条数。
+
+        new-api 的 logs 表 type=2 为消耗日志，quota 为消耗额度（整数）。
+        只读聚合，不返回原始明细。
+        """
+        p = self.placeholder
+        return self._fetch(
+            f"SELECT user_id, channel_id, SUM(quota) AS quota, COUNT(*) AS cnt "
+            f"FROM logs WHERE type = {p} AND created_at >= {p} AND created_at < {p} "
+            "GROUP BY user_id, channel_id",
+            (2, int(start_ts), int(end_ts)),
+        )
