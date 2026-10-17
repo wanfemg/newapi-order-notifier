@@ -45,6 +45,8 @@ DEFAULTS = {
     "weekly_report": True,
     # 站点充值汇率与消耗统计（只读 new-api，成本单价与汇率存本程序自己的库）
     "rate_currency": "CNY",   # 用户消耗金额的计价货币（1 rate_currency = X 额度）
+    "consume_daily_report_enabled": False,
+    "consume_daily_report_time": "09:00",
     "consume_enabled": False,  # 是否开启消耗统计自动通知
     "consume_interval": 600,   # 消耗统计检查间隔（秒）
     "consume_threshold_quota": 0,  # 累计额度达到该值触发阈值通知，0 表示关闭
@@ -60,13 +62,14 @@ ENV_KEYS = ("db_type", "db_dsn", "sqlite_path", "poll_interval")
 BOOL_KEYS = {
     "enabled", "push_success", "push_failed",
     "push_expired", "scope_wallet", "scope_subscription", "backfill", "daily_report",
-    "weekly_report", "consume_enabled",
+    "weekly_report", "consume_enabled", "consume_daily_report_enabled",
 }
 INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes", "consume_interval",
             "consume_threshold_quota", "consume_change_quota"}
 FLOAT_KEYS = {"large_order_threshold", "min_push_amount"}
 STR_KEYS = {"dingtalk_webhook", "dingtalk_secret", "dingtalk_keyword",
-            "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path", "rate_currency"}
+            "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path", "rate_currency",
+            "consume_daily_report_time"}
 
 DB_TYPES = ("postgres", "mysql", "sqlite")
 
@@ -195,6 +198,8 @@ def coerce(key, value):
             number = int(str(value).strip())
         except (TypeError, ValueError):
             raise ValueError(f"{key} 需要是整数") from None
+        if key in ("consume_threshold_quota", "consume_change_quota") and number < 0:
+            raise ValueError(f"{key} 需要是非负整数")
         return number
     if key in FLOAT_KEYS:
         try:
@@ -204,6 +209,10 @@ def coerce(key, value):
         if not math.isfinite(number) or number < 0:
             raise ValueError(f"{key} 需要是非负有限金额")
         return number
+    if key == "consume_daily_report_time":
+        if not isinstance(value, str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value):
+            raise ValueError(f"{key} 需要是 HH:MM 格式的有效时间（00:00 ~ 23:59）")
+        return value
     if key in STR_KEYS:
         return str(value).strip()
     return value
@@ -231,7 +240,8 @@ def validate(config):
         errors.append("汇率基准货币不能为空")
     if not 10 <= config["consume_interval"] <= 86400:
         errors.append("消耗统计检查间隔需要在 10 ~ 86400 秒之间")
-    for key in FLOAT_KEYS:
+    for key in (*FLOAT_KEYS, "consume_daily_report_time",
+                "consume_threshold_quota", "consume_change_quota"):
         try:
             coerce(key, config[key])
         except ValueError as exc:

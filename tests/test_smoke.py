@@ -683,6 +683,8 @@ def main():
     status_code, payload = call(get4("/api/reports"))
     check(status_code == 200 and payload == {
         "daily_report": True, "weekly_report": True, "daily_last": "", "weekly_last": "",
+        "consume_daily_report_enabled": False, "consume_daily_report_time": "09:00",
+        "consume_daily_runs": [],
     }, "报告状态默认值及字段精确符合契约")
     call(post4("/api/config", {"weekly_report": False, "daily_report": False}))
     before = len(RECEIVED)
@@ -704,7 +706,9 @@ def main():
     store4.set_state("weekly_report_last", "2026-10-05 ~ 2026-10-11")
     status_code, payload = call(get4("/api/reports"))
     check(payload == {"daily_report": False, "weekly_report": False,
-                      "daily_last": "2026-10-15", "weekly_last": "2026-10-05 ~ 2026-10-11"},
+                      "daily_last": "2026-10-15", "weekly_last": "2026-10-05 ~ 2026-10-11",
+                      "consume_daily_report_enabled": False,
+                      "consume_daily_report_time": "09:00", "consume_daily_runs": []},
           "报告状态读取独立开关和既有/新增状态键")
     status_code, payload = call(post4("/api/weekly-report", {}))
     check(status_code == 400 and payload.get("ok") is False,
@@ -852,19 +856,26 @@ def main():
         profile_before = list(conn.iterdump())
     with patch.object(webui_module.finance_module, "range_window", return_value=(start, end)):
         status_code, payload = call(get4("/api/finance/users?days=7"))
-        check(status_code == 200 and payload == {"days": 7, "items": [
+        check(status_code == 200 and payload["days"] == 7 and payload["items"] == [
             {"user_id": 1, "username": "alice", "total": 398.0, "orders": 3,
              "average": 132.67, "first_time": start, "last_time": profile_now,
              "wallet": 199.0, "subscription": 199.0},
             {"user_id": 2, "username": "bob", "total": 50.0, "orders": 1,
              "average": 50.0, "first_time": profile_now - 10, "last_time": profile_now - 10,
              "wallet": 50.0, "subscription": 0.0},
-        ]}, "画像字段精确匹配，排除窗外/失败单，时间取窗口内 create_time")
+        ], "画像充值 items 精确匹配，排除窗外/失败单，时间取窗口内 create_time")
+        check(set(payload) == {"days", "items", "consumption_users", "currency", "consumption_error"}
+              and payload["consumption_users"] == [] and payload["currency"] == "CNY"
+              and payload["consumption_error"] == "读取消耗数据失败：no such table: logs",
+              "缺少 logs 时明确返回消耗读取错误，充值画像仍可用")
         status_code, default_profile = call(get4("/api/finance/users"))
         check(status_code == 200 and default_profile == payload, "画像默认使用 7 天窗口")
     with patch.object(webui_module.finance_module, "range_window", return_value=(end + 1, end + 2)):
         status_code, payload = call(get4("/api/finance/users?days=1"))
-        check(status_code == 200 and payload == {"days": 1, "items": []}, "无成功订单时返回空画像")
+        check(status_code == 200 and payload == {
+            "days": 1, "items": [], "consumption_users": [], "currency": "CNY",
+            "consumption_error": "读取消耗数据失败：no such table: logs",
+        }, "无成功订单时返回空充值画像，同时保留明确的缺 logs 错误")
     with sqlite3.connect(profile_db) as conn:
         check(list(conn.iterdump()) == profile_before, "画像查询和通知器配置保存不改写源库")
     print("\n27) 真实轮询链路应用降噪和大额阈值")
@@ -939,21 +950,28 @@ def main():
     consume_store = store_module.Store(os.path.join(tmp, "consume-state.db"))
     consume_store.set_configs({"db_type": "sqlite", "sqlite_path": consume_db,
                                "rate_currency": "CNY"})
-    consume_store.set_exchange_rate("CNY", "7")
-    consume_store.set_channel_cost(1, "0.01", "CNY")
-    consume_store.set_channel_cost(2, "0.02", "CNY")
+    with patch.object(store_module.time, "time", return_value=900):
+        consume_store.set_exchange_rate("CNY", "7")
+        consume_store.set_channel_cost(1, "0.01", "CNY")
+        consume_store.set_channel_cost(2, "0.02", "CNY")
     consume_source = source_module.SourceDB(config_module.effective_config(consume_store))
     cstats = consumption_module.compute(consume_store, consume_source, 0, 10 ** 12, "CNY")
     check(cstats["quota"] == 200, "总消耗额度 200")
-    check(cstats["user_money"] == "28.571429", "用户消耗金额 200/7 = 28.571429")
+    check(cstats["website_units"] == "0.0004" and cstats["user_money"] is None,
+          "200 raw quota = 0.0004 网站额度；仅有全局汇率时人民币未知")
     check(cstats["upstream_cost"] == "1.2", "上游成本 80*0.01 + 20*0.02 = 1.2")
     check([(c["channel_id"], c["quota"], c["cost"], c["cost_currency"])
            for c in cstats["channels"]] ==
-          [(3, 100, "0", "CNY"), (1, 80, "0.8", "CNY"), (2, 20, "0.4", "CNY")],
-          "渠道按额度降序且成本口径正确")
+          [(3, 100, None, "CNY"), (1, 80, "0.8", "CNY"), (2, 20, "0.4", "CNY")],
+          "渠道按额度降序且成本口径正确，缺成本不是零成本")
+    ch3 = next(channel for channel in cstats["channels"] if channel["channel_id"] == 3)
+    check(ch3["profit"] is None and ch3["complete"] is False
+          and ch3["cost_configured"] is False
+          and cstats["profit"] is None and cstats["complete"] is False,
+          "渠道3缺成本导致渠道及全站利润不可准确计算")
     check([(u["user_id"], u["quota"], u["money"]) for u in cstats["users"]] ==
-          [(2, 110, "15.714286"), (1, 90, "12.857143")],
-          "用户按额度降序且金额 = 额度/汇率")
+          [(1, 90, None), (2, 110, None)],
+          "缺渠道充值比例时用户金额未知，不使用全局汇率；同为未知按 ID 排序")
 
     print("\n31) 消耗监控：变动通知、阈值通知与水位推进")
     monitor_db = os.path.join(tmp, "monitor-source.db")
@@ -988,13 +1006,15 @@ def main():
               "清零后重新累计 60")
     messages = RECEIVED[before:]
     check(len(messages) == 3, "三轮消耗推送了 3 条消息")
-    check(any("累计消耗额度**：100" in item["markdown"]["text"] for item in messages),
-          "阈值消息附带累计消耗额度 100")
+    check(any("累计底层 quota**：100" in item["markdown"]["text"]
+              and "累计网站额度**：0.0002" in item["markdown"]["text"]
+              and "折算人民币消费" in item["markdown"]["text"] for item in messages),
+          "阈值消息同时展示累计 raw quota、网站额度和人民币折算")
 
     print("\n32) 消耗 HTTP 接口：汇率保存、渠道成本与消耗统计")
     consume_http_db = os.path.join(tmp, "consume-http-source.db")
     build_consume_db(consume_http_db)
-    add_consume_log(consume_http_db, 1, 1, 1, 900, int(time.time()))
+    rate_saved_at = int(time.time()) - 10
     store5 = store_module.Store(os.path.join(tmp, "consume-http.db"))
     store5.set_configs({"db_type": "sqlite", "sqlite_path": consume_http_db,
                         "dingtalk_webhook": webhook, "rate_currency": "CNY"})
@@ -1023,10 +1043,13 @@ def main():
     status_code, payload = call(get5("/api/rates"))
     check(status_code == 200 and payload["rates"] == [] and payload["history"] == [],
           "初始汇率列表与历史均为空")
-    status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7"}))
+    with patch.object(store_module.time, "time", return_value=rate_saved_at - 1):
+        status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7"}))
     check(status_code == 200 and payload["ok"] and not payload["changed"]
           and not payload["notified"], "首次保存汇率不触发通知")
-    status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7.5"}))
+    with patch.object(store_module.time, "time", return_value=rate_saved_at):
+        status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7.5"}))
+    add_consume_log(consume_http_db, 1, 1, 1, 900, rate_saved_at + 1)
     check(status_code == 200 and payload["changed"] and payload["notified"],
           "调整汇率触发通知")
     status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "0"}))
@@ -1047,10 +1070,10 @@ def main():
     check(ch1["cost_per_unit"] == "", "删除后成本单价为空")
 
     status_code, payload = call(get5("/api/consumption?days=1"))
-    check(status_code == 200 and payload["rate"] == "7.5" and payload["quota"] == 900
-          and payload["user_money"] == "120" and payload["upstream_cost"] == "0"
-          and payload["has_rate"] is True,
-          "消耗统计按最新汇率 7.5 计算，900 额度 = 120 元")
+    check(status_code == 200 and payload["rate"] == "0" and payload["quota"] == 900
+          and payload["website_units"] == "0.0018" and payload["user_money"] is None
+          and payload["upstream_cost"] is None and payload["has_rate"] is False,
+          "消费接口保留网站额度；只有全局汇率而无渠道比例时人民币未知")
     httpd5.shutdown()
 
     failed = [label for ok, label in CHECKS if not ok]
