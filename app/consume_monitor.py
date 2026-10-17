@@ -17,6 +17,7 @@ import time
 import config as config_module
 import consumption
 from notify import send_markdown
+from report import day_window
 from source import SourceDB
 
 LAST_TS_KEY = "consume_last_ts"
@@ -117,7 +118,8 @@ class ConsumptionMonitor:
         """发送一条消耗通知并记录历史。返回是否成功。"""
         text = consumption.render_consumption(stats, title=title)[1]
         if cumulative is not None:
-            text += f"\n\n- **累计消耗额度**：{cumulative:,}"
+            text += (f"\n\n- **累计底层 quota**：{cumulative:,}"
+                     f"\n- **累计网站额度**：{consumption.fmt_money(consumption.Decimal(cumulative) / consumption.QUOTA_PER_UNIT)}")
         ok, detail = send_markdown(
             config["dingtalk_webhook"], title, text,
             secret=config["dingtalk_secret"], keyword=config["dingtalk_keyword"],
@@ -128,8 +130,10 @@ class ConsumptionMonitor:
             "trade_no": f"{stats.get('start_ts')}-{stats.get('end_ts')}",
             "status": "success" if ok else "failed",
             "username": "",
-            "money": float(stats.get("user_money") or 0),
-            "reason": f"{int(stats.get('quota') or 0)} 额度",
+            "money": stats.get("user_money"),
+            "money_known": stats.get("user_money") is not None,
+            "reason": (f"网站额度 {stats.get('website_units', '未知')}；"
+                       f"底层 quota {int(stats.get('quota') or 0):,}"),
             "reason_source": kind,
             "ok": ok,
             "detail": text,
@@ -140,12 +144,67 @@ class ConsumptionMonitor:
             self.log.warning("消耗通知推送失败 %s：%s", kind, detail)
         return ok
 
+    def run_daily_if_due(self):
+        """到点后认领昨日财务日报；发送失败或进程重启也不自动重发。"""
+        with self._lock:
+            config = config_module.effective_config(self.store)
+            if not config["consume_daily_report_enabled"]:
+                return 0
+            now = time.time()
+            local = time.localtime(now)
+            hour, minute = map(int, config["consume_daily_report_time"].split(":"))
+            if (local.tm_hour, local.tm_min) < (hour, minute):
+                return 0
+            start, end, day = day_window(now)
+            if not self.store.claim_daily_report(day):
+                return 0
+            try:
+                problems = config_module.validate(config)
+                if problems:
+                    raise ValueError("配置不完整：" + "；".join(problems))
+                stats = consumption.compute(
+                    self.store, SourceDB(config), start, end, config["rate_currency"])
+                title, text = consumption.render_consumption(
+                    stats, title=f"每日财务汇总 {day}")
+                mobiles = [m.strip() for m in config["dingtalk_at_mobiles"].split(",")
+                           if m.strip()]
+                ok, detail = send_markdown(
+                    config["dingtalk_webhook"], title, text,
+                    secret=config["dingtalk_secret"], keyword=config["dingtalk_keyword"],
+                    at_mobiles=mobiles)
+            except Exception as exc:
+                ok, detail = False, str(exc)
+                self.log.exception("每日财务汇总失败：%s", exc)
+            self.store.finish_daily_report(day, ok, detail)
+            if ok:
+                self.status["pushed"] += 1
+                self.status["last_error"] = ""
+            else:
+                self.status["last_error"] = str(detail)
+                self.log.warning("每日财务汇总推送失败：%s", detail)
+            return int(ok)
+
     def loop(self):
+        last_threshold_check = None
+        interval = 30
         while not self._stop.is_set():
             try:
-                self.run_once()
+                config = config_module.effective_config(self.store)
+                interval = max(10, int(config["consume_interval"]))
+                if (last_threshold_check is None or
+                        time.monotonic() - last_threshold_check >= interval):
+                    try:
+                        self.run_once()
+                    finally:
+                        last_threshold_check = time.monotonic()
             except Exception as exc:
                 self.status["last_error"] = str(exc)
                 self.log.exception("消耗统计出错：%s", exc)
-            config = config_module.effective_config(self.store)
-            self._stop.wait(max(10, int(config["consume_interval"])))
+            try:
+                self.run_daily_if_due()
+            except Exception as exc:
+                self.status["last_error"] = str(exc)
+                self.log.exception("每日财务调度出错：%s", exc)
+            remaining = (interval if last_threshold_check is None else
+                         interval - (time.monotonic() - last_threshold_check))
+            self._stop.wait(min(30, max(1, remaining)))

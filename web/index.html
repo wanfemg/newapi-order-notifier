@@ -4,21 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>new-api 财务后台</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=glass-20261018">
 </head>
 <body>
   <div id="login" class="overlay hidden">
     <form id="login-form" class="glass login-card">
-      <h2>管理登录</h2>
-      <p class="muted">口令在容器日志中打印（或由 UI_PASSWORD 环境变量指定）</p>
+      <span class="eyebrow">NEW-API · FINANCE</span>
+      <h2>欢迎回到账本</h2>
+      <p class="muted">输入管理口令，查看你的站点收支。</p>
       <input type="password" id="password" placeholder="管理口令" aria-label="管理口令" autocomplete="current-password" required>
-      <button type="submit" class="btn primary">登录</button>
+      <button type="submit" class="btn primary">登录管理后台</button>
+      <p class="muted">口令在容器日志中打印，或由 UI_PASSWORD 环境变量指定。</p>
       <p id="login-error" class="error" role="status"></p>
     </form>
   </div>
 
   <div id="app" class="shell hidden">
-    <header class="topbar glass">
+    <header class="topbar">
       <div class="brand">
         <span>财务后台</span>
         <span id="version" class="pill"></span>
@@ -31,17 +33,26 @@
     </header>
 
     <nav class="nav glass" aria-label="主导航">
-      <a href="#/overview" data-view="overview">概览</a>
-      <a href="#/orders" data-view="orders">订单流水</a>
-      <a href="#/ranking" data-view="ranking">排行榜</a>
-      <a href="#/users" data-view="users">用户画像</a>
-      <a href="#/rates" data-view="rates">汇率配置</a>
-      <a href="#/consumption" data-view="consumption">消耗统计</a>
-      <a href="#/reports" data-view="reports">报表与推送</a>
-      <a href="#/settings" data-view="settings">设置</a>
+      <div class="nav-brand"><span class="brand-mark" aria-hidden="true">F</span>额度账本</div>
+      <div class="nav-caption">WORKSPACE</div>
+      <a href="#/overview" data-view="overview"><span aria-hidden="true">▦</span>财务概览</a>
+      <a href="#/orders" data-view="orders"><span aria-hidden="true">≡</span>订单流水</a>
+      <a href="#/ranking" data-view="ranking"><span aria-hidden="true">↗</span>充值排行</a>
+      <a href="#/users" data-view="users"><span aria-hidden="true">◎</span>用户画像</a>
+      <a href="#/rates" data-view="rates"><span aria-hidden="true">⇄</span>汇率配置</a>
+      <a href="#/consumption" data-view="consumption"><span aria-hidden="true">◷</span>消耗统计</a>
+      <div class="nav-caption">MANAGEMENT</div>
+      <a href="#/reports" data-view="reports"><span aria-hidden="true">▤</span>报表与推送</a>
+      <a href="#/settings" data-view="settings"><span aria-hidden="true">⚙</span>系统设置</a>
+      <div class="nav-footer">独立财务工作空间<br><span>new-api 数据源 · 只读访问</span></div>
     </nav>
 
     <main class="content">
+      <div class="workspace-heading">
+        <div class="eyebrow">FINANCE · WITH CLARITY</div>
+        <h1>每一笔收支，清晰可见。</h1>
+        <p class="muted">站点充值、额度消耗与渠道成本，一目了然。</p>
+      </div>
       <section id="view-overview" class="view"></section>
       <section id="view-orders" class="view"></section>
       <section id="view-ranking" class="view"></section>

@@ -304,15 +304,15 @@ class SourceDB:
             return []  # 老版本库可能还没有 channels 表
 
     def consumption(self, start_ts, end_ts):
-        """窗口内消耗日志按 (user_id, channel_id) 汇总 quota 与条数。
+        """窗口内消耗日志按 (user_id, channel_id, created_at) 汇总 quota 与条数。
 
         new-api 的 logs 表 type=2 为消耗日志，quota 为消耗额度（整数）。
         只读聚合，不返回原始明细。
         """
         p = self.placeholder
         return self._fetch(
-            f"SELECT user_id, channel_id, SUM(quota) AS quota, COUNT(*) AS cnt "
+            f"SELECT user_id, channel_id, created_at, SUM(quota) AS quota, COUNT(*) AS cnt "
             f"FROM logs WHERE type = {p} AND created_at >= {p} AND created_at < {p} "
-            "GROUP BY user_id, channel_id",
+            "GROUP BY user_id, channel_id, created_at ORDER BY created_at, user_id, channel_id",
             (2, int(start_ts), int(end_ts)),
         )

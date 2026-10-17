@@ -212,6 +212,9 @@ class Handler(BaseHTTPRequestHandler):
                 "weekly_report": config["weekly_report"],
                 "daily_last": self.server.store.get_state("daily_report_last"),
                 "weekly_last": self.server.store.get_state("weekly_report_last"),
+                "consume_daily_report_enabled": config["consume_daily_report_enabled"],
+                "consume_daily_report_time": config["consume_daily_report_time"],
+                "consume_daily_runs": self.server.store.daily_report_runs(),
             })
         if path == "/api/orders":
             return self._orders()
@@ -219,6 +222,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._orders_export()
         if path == "/api/rates":
             return self._rates()
+        if path == "/api/channel-finance":
+            return self._channel_finance()
+        if path == "/api/channel-finance/history":
+            return self._channel_finance_history()
         if path == "/api/channels":
             return self._channels()
         if path == "/api/consumption":
@@ -253,6 +260,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if path == "/api/rates":
             return self._save_rate()
+        if path == "/api/channel-finance":
+            return self._save_channel_finance()
+        if path == "/api/channel-finance/delete":
+            return self._delete_channel_finance()
         if path == "/api/cost":
             return self._save_cost()
         if path == "/api/cost/delete":
@@ -278,7 +289,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True}, cookie=token)
 
     def _save_config(self):
-        body = self._read_json() or {}
+        body = self._read_json()
+        if not isinstance(body, dict):
+            return self._json({"error": "配置必须是 JSON 对象"}, 400)
         incoming = body.get("config") if isinstance(body.get("config"), dict) else body
         values = {}
         for key, value in incoming.items():
@@ -361,6 +374,59 @@ class Handler(BaseHTTPRequestHandler):
             "notified": notified, "detail": detail,
         })
 
+    def _channel_finance(self):
+        config = config_module.effective_config(self.server.store)
+        try:
+            channels = SourceDB(config).channels()
+        except Exception as exc:
+            return self._json({"error": f"读取渠道失败：{exc}"}, 500)
+        return self._json({
+            "items": self.server.store.list_channel_finance(),
+            "history": self.server.store.list_channel_finance_history(),
+            "channels": channels,
+        })
+
+    @staticmethod
+    def _channel_id(value):
+        text = str(value)
+        if isinstance(value, bool) or not text.isascii() or not text.isdigit() or int(text) <= 0:
+            raise ValueError("channel_id 必须是正整数")
+        return int(text)
+
+    def _channel_finance_history(self):
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True)
+        channel_id = None
+        if "channel_id" in query:
+            try:
+                if len(query["channel_id"]) != 1:
+                    raise ValueError("channel_id 必须是单个正整数")
+                channel_id = self._channel_id(query["channel_id"][0])
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+        return self._json({
+            "items": self.server.store.list_channel_finance_history(channel_id),
+        })
+
+    def _save_channel_finance(self):
+        body = self._read_json()
+        try:
+            item = rates_module.save_channel_finance(self.server.store, body)
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        return self._json({"ok": True, "item": item})
+
+    def _delete_channel_finance(self):
+        body = self._read_json()
+        try:
+            if not isinstance(body, dict):
+                raise ValueError("渠道配置必须是对象")
+            channel_id = self._channel_id(body.get("channel_id"))
+            self.server.store.delete_channel_finance(channel_id)
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        return self._json({"ok": True, "channel_id": channel_id})
+
     def _channels(self):
         config = config_module.effective_config(self.server.store)
         try:
@@ -380,8 +446,11 @@ class Handler(BaseHTTPRequestHandler):
             channel_id = int(body.get("channel_id"))
         except (TypeError, ValueError):
             return self._json({"error": "渠道 ID 需要是整数"}, 400)
-        cost_per_unit = rates_module.parse_cost(body.get("cost_per_unit"))
-        currency = rates_module.normalize_currency(body.get("cost_currency") or "CNY")
+        try:
+            cost_per_unit = rates_module.parse_cost(body.get("cost_per_unit"))
+            currency = rates_module.normalize_currency(body.get("cost_currency") or "CNY")
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
         self.server.store.set_channel_cost(channel_id, str(cost_per_unit), currency)
         return self._json({"ok": True, "channel_id": channel_id})
 
@@ -512,7 +581,22 @@ class Handler(BaseHTTPRequestHandler):
                 [row["user_id"] for row in rows])
         except Exception as exc:
             return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
-        return self._json({"days": days, "items": finance_module.users(rows, names)})
+        config = config_module.effective_config(self.server.store)
+        payload = {
+            "days": days, "items": finance_module.users(rows, names),
+            "consumption_users": [], "currency": config["rate_currency"],
+            "consumption_error": "",
+        }
+        start, end = finance_module.range_window(days)
+        try:
+            stats = consumption_module.compute(
+                self.server.store, SourceDB(config), int(start), int(end),
+                config["rate_currency"])
+            payload["consumption_users"] = stats["users"]
+            payload["currency"] = stats["currency"]
+        except Exception as exc:
+            payload["consumption_error"] = f"读取消耗数据失败：{exc}"
+        return self._json(payload)
 
     def _flow_rows(self, days, limit, buckets):
         """窗口内的流水订单，超时未支付的 pending 按 expire_minutes 推导为超时。"""
