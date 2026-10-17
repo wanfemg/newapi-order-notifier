@@ -92,6 +92,55 @@ class FinanceAPITest(unittest.TestCase):
         body.update(overrides)
         return self.call("/api/channel-finance", body)
 
+    def test_explicit_ranges_and_validation(self):
+        paths = ("/api/finance/summary", "/api/finance/trend", "/api/finance/ranking",
+                 "/api/finance/users", "/api/orders", "/api/orders/export.csv", "/api/consumption")
+        for path in paths:
+            for query in ("start=1", "end=2", "start=&end=2", "start=0&end=2",
+                          "start=2&end=2", "start=3&end=2", "start=1.5&end=2",
+                          "start=1&start=2&end=3", "start=-1&end=2"):
+                with self.subTest(path=path, query=query):
+                    self.assertEqual(self.call(path + "?" + query)[0], 400)
+        query = f"?days=1&start={self.now}&end={self.now + 1}"
+        self.assertEqual(self.call(paths[0] + query)[1]["total"]["money"], 20)
+        excluded = f"?start={self.now - 1}&end={self.now}"
+        self.assertEqual(self.call(paths[0] + excluded)[1]["total"]["orders"], 0)
+        self.assertEqual(len(self.call(paths[1] + query)[1]["points"]), 1)
+        self.assertEqual(len(self.call(paths[2] + query)[1]["items"]), 1)
+        self.assertEqual(len(self.call(paths[3] + query)[1]["consumption_users"]), 1)
+        self.assertEqual(self.call(paths[-1] + query)[1]["start_ts"], self.now)
+        for path in ("/api/orders", "/api/orders/export.csv"):
+            with patch.object(source.SourceDB, "window_orders", return_value=[]) as fetch:
+                if path.endswith("csv"):
+                    request = urllib.request.Request(self.base + path + query,
+                                                     headers={"Cookie": self.cookie})
+                    with urllib.request.urlopen(request) as response:
+                        self.assertTrue(response.read().startswith(b"\xef\xbb\xbf"))
+                else:
+                    self.assertEqual(self.call(path + query)[0], 200)
+                self.assertEqual(fetch.call_args.args[:2], (self.now, self.now + 1))
+
+    def test_historical_backfill_contract_and_security(self):
+        path = "/api/channel-finance/backfill"
+        self.assertEqual(self.call(path + "?channel_id=1", auth=False)[0], 401)
+        self.assertEqual(self.call(path, {}, csrf=False)[0], 403)
+        for value in (1, "true", False, None):
+            self.assertEqual(self.call(path, {"channel_id": 1, "confirmed": value})[0], 400)
+        self.assertEqual(self.call(path + "?channel_id=1&channel_id=2")[0], 400)
+        self.assertFalse(self.call(path + "?channel_id=1")[1]["eligible"])
+        self.store.upsert_channel_finance(1, "channel", "CNY", "7", "CNY", "0", self.now + 10)
+        preview = self.call(path + "?channel_id=1")[1]
+        self.assertIs(preview["eligible"], True)
+        self.assertEqual((preview["start"], preview["end"]), (self.now, self.now + 10))
+        before = self.store.list_channel_finance_history()
+        for _ in range(2):
+            status, result, _ = self.call(path, {"channel_id": 1, "confirmed": True})
+            self.assertEqual(status, 200)
+            self.assertEqual(set(result), {"message"})
+        self.assertFalse(self.call(path + "?channel_id=1")[1]["eligible"])
+        self.assertEqual(self.store.list_channel_finance_history(), before)
+        self.assertTrue(self.call(f"/api/consumption?start={self.now}&end={self.now + 1}")[1]["has_rate"])
+
     def test_authentication_and_csrf(self):
         for path in ("/api/channel-finance", "/api/channel-finance/history",
                      "/api/finance/users", "/api/reports", "/api/consumption"):

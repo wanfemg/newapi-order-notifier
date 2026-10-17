@@ -57,6 +57,75 @@ class ChannelFinanceTests(unittest.TestCase):
     def stats(self, start=0, end=1000):
         return compute(self.store, self.source, start, end, "CNY")
 
+    def test_backfill_first_snapshot_persistence_and_delete_gap(self):
+        self.log(1, 1, 3500000, 50)
+        self.config(rate="7", cost="0", ts=100)
+        first = self.store.first_channel_snapshot(1)
+        self.config(rate="14", ts=200)
+        self.store.delete_channel_finance(1, 300)
+        self.config(rate="28", ts=400)
+        history = self.store.list_channel_finance_history()
+        with source_connection(self.source_path) as conn:
+            before = list(conn.iterdump())
+        self.assertEqual(self.source.first_channel_consumption(1, 100), 50)
+        self.assertTrue(self.store.save_channel_backfill(1, first["id"], 50, 100))
+        self.assertFalse(self.store.save_channel_backfill(1, first["id"], 50, 100))
+        self.assertEqual(Decimal(self.stats(50, 100)["money"]), Decimal("1"))
+        self.assertIsNone(self.store.find_channel_snapshot(1, 49))
+        self.assertEqual(self.store.find_channel_snapshot(1, 100)["fee_rate"], "7")
+        self.assertEqual(self.store.find_channel_snapshot(1, 200)["fee_rate"], "14")
+        self.assertIsNone(self.store.find_channel_snapshot(1, 350))
+        self.assertEqual(self.store.list_channel_finance_history(), history)
+        other = Store(self.path)
+        try:
+            self.assertFalse(other.save_channel_backfill(1, first["id"], 50, 100))
+            self.assertEqual(other.find_channel_snapshot(1, 50)["fee_rate"], "7")
+        finally:
+            other._conn.close()
+        with source_connection(self.source_path) as conn:
+            self.assertEqual(list(conn.iterdump()), before)
+
+    def test_backfill_concurrent_connections_once(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.config()
+        first = self.store.first_channel_snapshot(1)
+        other = Store(self.path)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(
+                    lambda db: db.save_channel_backfill(1, first["id"], 50, 100),
+                    (self.store, other)))
+            self.assertEqual(sorted(results), [False, True])
+        finally:
+            other._conn.close()
+
+    def test_backfill_transaction_rollback(self):
+        self.config()
+        first = self.store.first_channel_snapshot(1)
+        self.store._conn.execute(
+            "CREATE TRIGGER reject_backfill BEFORE INSERT ON channel_finance_backfill "
+            "BEGIN SELECT RAISE(ABORT, 'reject'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.save_channel_backfill(1, first["id"], 50, 100)
+        self.assertIsNone(self.store.channel_backfill(1))
+        self.assertIsNone(self.store.find_channel_snapshot(1, 50))
+
+    def test_channels_all_statuses_compatible_fields_and_errors(self):
+        with source_connection(self.source_path) as conn:
+            conn.execute("INSERT INTO channels VALUES (2, '禁用', '', '', 2)")
+            conn.execute("INSERT INTO channels VALUES (3, '自动禁用', '', '', 3)")
+        self.assertEqual([r["status"] for r in self.source.channels()], [1, 2, 3])
+        with source_connection(self.source_path) as conn:
+            conn.execute("DROP TABLE channels")
+            conn.execute("CREATE TABLE channels (id INTEGER, name TEXT, key TEXT)")
+            conn.execute("INSERT INTO channels VALUES (1, '旧渠道', 'secret')")
+        self.assertEqual(self.source.channels(), [
+            {"id": 1, "name": "旧渠道", "type": 0, "models": "", "status": 0}])
+        with source_connection(self.source_path) as conn:
+            conn.execute("DROP TABLE channels")
+        with self.assertRaises(sqlite3.OperationalError):
+            self.source.channels()
+
     def test_snapshot_boundaries_delete_recreate(self):
         self.config(ts=100)
         first = self.store.find_channel_snapshot(1, 100)

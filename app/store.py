@@ -77,6 +77,13 @@ CREATE TABLE IF NOT EXISTS channel_finance_history (
 );
 CREATE INDEX IF NOT EXISTS channel_finance_time
     ON channel_finance_history(channel_id, effective_at, id);
+CREATE TABLE IF NOT EXISTS channel_finance_backfill (
+    channel_id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS daily_report_runs (
     day TEXT PRIMARY KEY,
     status TEXT NOT NULL,
@@ -377,7 +384,39 @@ class Store:
         rows = self._read(
             "SELECT * FROM channel_finance_history WHERE channel_id = ? AND effective_at <= ? "
             "ORDER BY effective_at DESC, id DESC LIMIT 1", (int(channel_id), int(ts)))
-        return dict(rows[0]) if rows and not rows[0]["deleted"] else None
+        if rows:
+            return dict(rows[0]) if not rows[0]["deleted"] else None
+        rows = self._read(
+            "SELECT h.* FROM channel_finance_backfill b "
+            "JOIN channel_finance_history h ON h.id = b.snapshot_id "
+            "WHERE b.channel_id = ? AND b.start_ts <= ? AND b.end_ts > ?",
+            (int(channel_id), int(ts), int(ts)))
+        return dict(rows[0]) if rows else None
+
+    def first_channel_snapshot(self, channel_id):
+        rows = self._read(
+            "SELECT * FROM channel_finance_history WHERE channel_id = ? "
+            "ORDER BY effective_at, id LIMIT 1", (int(channel_id),))
+        return dict(rows[0]) if rows else None
+
+    def channel_backfill(self, channel_id):
+        rows = self._read("SELECT * FROM channel_finance_backfill WHERE channel_id = ?",
+                          (int(channel_id),))
+        return dict(rows[0]) if rows else None
+
+    def save_channel_backfill(self, channel_id, snapshot_id, start, end):
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            if self.channel_backfill(channel_id):
+                return False
+            snapshot = self.first_channel_snapshot(channel_id)
+            if (not snapshot or snapshot["deleted"] or snapshot["id"] != snapshot_id
+                    or snapshot["effective_at"] != end or not 0 < start < end):
+                raise ValueError("首次快照已变化，请重新预览")
+            self._conn.execute(
+                "INSERT INTO channel_finance_backfill VALUES (?, ?, ?, ?, ?)",
+                (int(channel_id), snapshot_id, int(start), int(end), int(time.time())))
+        return True
 
     def has_channel_finance_history(self, channel_id, ts):
         return bool(self._read(

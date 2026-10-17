@@ -53,6 +53,16 @@
         <h1>每一笔收支，清晰可见。</h1>
         <p class="muted">站点充值、额度消耗与渠道成本，一目了然。</p>
       </div>
+      <section id="query-period" class="card glass" aria-label="查询时间">
+        <form id="period-form" class="period-form">
+          <div class="field"><label for="period-start">开始时间（含）</label><input id="period-start" type="datetime-local" step="60" required></div>
+          <div class="field"><label for="period-end">结束时间（不含）</label><input id="period-end" type="datetime-local" step="60" required></div>
+          <button class="btn primary" type="submit">查询此区间</button>
+        </form>
+        <p id="period-zone" class="muted"></p>
+        <p id="period-label" class="muted" role="status"></p>
+        <p id="period-error" class="bad" role="status"></p>
+      </section>
       <section id="view-overview" class="view"></section>
       <section id="view-orders" class="view"></section>
       <section id="view-ranking" class="view"></section>

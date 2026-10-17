@@ -184,6 +184,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"authed": self._cookie_authed()})
         if not self._require_auth():
             return
+        if path in ("/api/finance/summary", "/api/finance/trend", "/api/finance/ranking",
+                    "/api/finance/users", "/api/orders", "/api/orders/export.csv",
+                    "/api/consumption"):
+            try:
+                self._period = self._range_window()
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+        if path == "/api/channel-finance/backfill":
+            return self._channel_backfill_preview()
         if path == "/api/config":
             current = config_module.effective_config(self.server.store)
             return self._json({
@@ -262,6 +271,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._save_rate()
         if path == "/api/channel-finance":
             return self._save_channel_finance()
+        if path == "/api/channel-finance/backfill":
+            return self._save_channel_backfill()
         if path == "/api/channel-finance/delete":
             return self._delete_channel_finance()
         if path == "/api/cost":
@@ -393,6 +404,61 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("channel_id 必须是正整数")
         return int(text)
 
+    def _backfill_preview(self, channel_id):
+        store = self.server.store
+        result = {"eligible": False, "start": 0, "end": 0, "message": "渠道尚无有效首次快照"}
+        record = store.channel_backfill(channel_id)
+        if record:
+            result.update(start=record["start_ts"], end=record["end_ts"], message="该渠道已完成历史补算")
+            return result, None
+        snapshot = store.first_channel_snapshot(channel_id)
+        if not snapshot or snapshot["deleted"] or snapshot["fee_currency"] != "CNY":
+            return result, None
+        rates_module.parse_rate(snapshot["fee_rate"])
+        end = snapshot["effective_at"]
+        source = SourceDB(config_module.effective_config(store))
+        start = source.first_channel_consumption(channel_id, end)
+        if start is None:
+            result["message"] = "首次快照之前没有可补算的消耗日志"
+            return result, snapshot
+        result.update(eligible=True, start=int(start), end=int(end),
+                      message="仅使用首次快照补算之前的历史消耗，不覆盖已有配置或删除空档")
+        return result, snapshot
+
+    def _channel_backfill_preview(self):
+        try:
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query, keep_blank_values=True)
+            ids = query.get("channel_id", [])
+            if len(ids) != 1:
+                raise ValueError("channel_id 必须是单个正整数")
+            channel_id = self._channel_id(ids[0])
+            result, _ = self._backfill_preview(channel_id)
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self._json({"error": f"预览历史补算失败：{exc}"}, 500)
+        return self._json(result)
+
+    def _save_channel_backfill(self):
+        try:
+            body = self._read_json()
+            if not isinstance(body, dict) or body.get("confirmed") is not True:
+                raise ValueError("历史补算必须明确 confirmed: true")
+            channel_id = self._channel_id(body.get("channel_id"))
+            result, snapshot = self._backfill_preview(channel_id)
+            if not result["eligible"]:
+                if self.server.store.channel_backfill(channel_id):
+                    return self._json({"message": result["message"]})
+                raise ValueError(result["message"])
+            saved = self.server.store.save_channel_backfill(
+                channel_id, snapshot["id"], result["start"], result["end"])
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self._json({"error": f"历史补算失败：{exc}"}, 500)
+        return self._json({"message": "历史补算已完成" if saved else "该渠道已完成历史补算"})
+
     def _channel_finance_history(self):
         query = urllib.parse.parse_qs(
             urllib.parse.urlparse(self.path).query, keep_blank_values=True)
@@ -466,7 +532,7 @@ class Handler(BaseHTTPRequestHandler):
     def _consumption(self):
         days = self._qint("days", 7, 1, 365)
         config = config_module.effective_config(self.server.store)
-        start, end = finance_module.range_window(days)
+        start, end = self._period
         try:
             stats = consumption_module.compute(
                 self.server.store, SourceDB(config), int(start), int(end),
@@ -532,9 +598,25 @@ class Handler(BaseHTTPRequestHandler):
             return default
         return max(minimum, min(maximum, value))
 
+    def _range_window(self):
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True)
+        if "start" not in query and "end" not in query:
+            return finance_module.range_window(self._qint("days", 7, 1, 365))
+        values = []
+        for key in ("start", "end"):
+            parts = query.get(key, [])
+            if (len(parts) != 1 or not parts[0].isascii() or not parts[0].isdigit()
+                    or not 0 < int(parts[0]) <= 253402300799):
+                raise ValueError("start/end 必须成对提供单个正整数 Unix 秒")
+            values.append(int(parts[0]))
+        if values[1] <= values[0]:
+            raise ValueError("end 必须大于 start")
+        return tuple(values)
+
     def _finance_success(self, days):
         """窗口内的成功订单行，供概览/趋势/排行复用。"""
-        start, end = finance_module.range_window(days)
+        start, end = self._period
         source = SourceDB(config_module.effective_config(self.server.store))
         return source.success_orders(int(start), int(end))
 
@@ -558,7 +640,7 @@ class Handler(BaseHTTPRequestHandler):
         days = self._qint("days", 7, 1, 365)
         try:
             rows = self._finance_success(days)
-            return self._json(finance_module.trend(rows, days))
+            return self._json(finance_module.trend(rows, days, *self._period))
         except Exception as exc:
             return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
 
@@ -587,7 +669,7 @@ class Handler(BaseHTTPRequestHandler):
             "consumption_users": [], "currency": config["rate_currency"],
             "consumption_error": "",
         }
-        start, end = finance_module.range_window(days)
+        start, end = self._period
         try:
             stats = consumption_module.compute(
                 self.server.store, SourceDB(config), int(start), int(end),
@@ -600,7 +682,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _flow_rows(self, days, limit, buckets):
         """窗口内的流水订单，超时未支付的 pending 按 expire_minutes 推导为超时。"""
-        start, end = finance_module.range_window(days)
+        start, end = self._period
         config = config_module.effective_config(self.server.store)
         expire_minutes = int(config["expire_minutes"] or 0)
         expire_before = int(time.time()) - expire_minutes * 60 if expire_minutes > 0 else None

@@ -297,11 +297,29 @@ class SourceDB:
 
     def channels(self):
         """只读渠道列表（id/name/type/models/status），供渠道成本单价配置用。"""
+        conn = self._connect()
         try:
-            return self._fetch(
-                "SELECT id, name, type, models, status FROM channels ORDER BY id", ())
-        except Exception:
-            return []  # 老版本库可能还没有 channels 表
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM channels WHERE 1 = 0")
+            columns = {column[0] for column in cursor.description}
+            if "id" not in columns:
+                raise SourceError("channels 表缺少 id 字段")
+            defaults = {"id": "0", "name": "''", "type": "0",
+                        "models": "''", "status": "0"}
+            fields = [name if name in columns else f"{default} AS {name}"
+                      for name, default in defaults.items()]
+            cursor.execute("SELECT " + ", ".join(fields) + " FROM channels ORDER BY id")
+            return [dict(zip(defaults, row)) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def first_channel_consumption(self, channel_id, end_ts):
+        p = self.placeholder
+        rows = self._fetch(
+            f"SELECT MIN(created_at) AS first_at FROM logs WHERE type = {p} "
+            f"AND channel_id = {p} AND quota > 0 AND created_at > 0 AND created_at < {p}",
+            (2, int(channel_id), int(end_ts)))
+        return rows[0]["first_at"]
 
     def consumption(self, start_ts, end_ts):
         """窗口内消耗日志按 (user_id, channel_id, created_at) 汇总 quota 与条数。

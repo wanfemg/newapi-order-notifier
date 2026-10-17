@@ -77,6 +77,7 @@ def build_source_db(path):
             payment_provider TEXT, status TEXT, create_time INTEGER,
             complete_time INTEGER, provider_payload TEXT);
         CREATE TABLE subscription_plans (id INTEGER PRIMARY KEY, title TEXT);
+        CREATE TABLE channels (id INTEGER PRIMARY KEY, name TEXT);
     """)
     conn.execute("INSERT INTO users (id, username, display_name) VALUES (1, 'alice', '爱丽丝')")
     # display_name 与 username 故意不同，用来验证推送里显示的是用户名

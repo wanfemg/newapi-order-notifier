@@ -194,6 +194,7 @@ function initTheme() {
 /* ---------- 界面切换 ---------- */
 
 function showLogin() {
+  for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
   pageVersion++;
   configRequest++;
   statusRequest++;
@@ -215,18 +216,59 @@ function showApp() {
 
 const RANGES = [['1', '今天'], ['7', '近 7 天'], ['30', '近 30 天'], ['90', '近 90 天']];
 
+let appliedPeriod = null;
+
+function localMinute(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function periodQuery(extra = {}) {
+  return new URLSearchParams({ days: String(currentRange), start: String(appliedPeriod.start), end: String(appliedPeriod.end), ...extra });
+}
+
+function periodLabel() {
+  return `[${formatTime(appliedPeriod.start)}, ${formatTime(appliedPeriod.end)})`;
+}
+
+function applyPeriod(start, end, custom = false) {
+  appliedPeriod = { start, end };
+  $('period-start').value = localMinute(new Date(start * 1000));
+  $('period-end').value = localMinute(new Date(end * 1000));
+  $('period-label').textContent = `当前查询区间：${periodLabel()}`;
+  setMessage('period-error', '');
+  $('period-end').setCustomValidity('');
+  for (const button of $('range').querySelectorAll('button')) {
+    const active = !custom && Number(button.dataset.days) === currentRange;
+    button.classList.toggle('on', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
+function quickPeriod() {
+  const end = new Date();
+  end.setSeconds(0, 0);
+  const start = new Date(end);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - currentRange + 1);
+  applyPeriod(Math.floor(start.getTime() / 1000), Math.floor(end.getTime() / 1000));
+}
+
 function buildRange() {
   const wrap = $('range');
   wrap.textContent = '';
   for (const [days, label] of RANGES) {
     const btn = el('button', Number(days) === currentRange ? 'on' : '', label);
+    btn.dataset.days = days;
     btn.addEventListener('click', () => {
       currentRange = Number(days);
-      for (const b of wrap.querySelectorAll('button')) b.classList.toggle('on', b.textContent === label);
+      quickPeriod();
       if (!['settings', 'reports', 'rates'].includes(currentRoute())) renderCurrent();
     });
     wrap.appendChild(btn);
   }
+  if (!appliedPeriod) quickPeriod();
+  $('period-zone').textContent = `浏览器时区：${Intl.DateTimeFormat().resolvedOptions().timeZone}；精确到分钟，区间为 [开始, 结束)，不影响服务端每日调度。修改后点击查询才应用。`;
 }
 
 /* ---------- 路由 ---------- */
@@ -240,6 +282,8 @@ function renderCurrent() {
   pageVersion++;
   const view = currentRoute();
   $('range').classList.toggle('hidden', ['settings', 'reports', 'rates'].includes(view));
+  $('query-period').classList.toggle('hidden', ['settings', 'reports', 'rates'].includes(view));
+  document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
   document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
   const target = $('view-' + view);
   if (!target) return;
@@ -376,8 +420,8 @@ async function renderOverview() {
   const root = $('view-overview');
   empty(root, '加载中…');
   const [sRes, tRes] = await Promise.all([
-    api(`/api/finance/summary?days=${currentRange}`),
-    api(`/api/finance/trend?days=${currentRange}`),
+    api(`/api/finance/summary?${periodQuery()}`),
+    api(`/api/finance/trend?${periodQuery()}`),
   ]);
   if (version !== pageVersion || !root.isConnected) return;
   if (sRes.status === 401 || tRes.status === 401) return showLogin();
@@ -388,7 +432,7 @@ async function renderOverview() {
   const trend = tRes.ok ? tRes.data : { points: [] };
 
   const kpis = el('div', 'kpi-grid');
-  kpis.appendChild(kpi('区间总收入', fmtYuan(sum.total.money), `近 ${currentRange} 天`, true));
+  kpis.appendChild(kpi('区间总收入', fmtYuan(sum.total.money), periodLabel(), true));
   kpis.appendChild(kpi('订单笔数', String(sum.total.orders), '成功订单'));
   kpis.appendChild(kpi('充值人数', String(sum.total.users), '去重用户'));
   kpis.appendChild(kpi('今日收入', fmtYuan(sum.today.money), `今日 ${sum.today.orders} 笔`));
@@ -499,7 +543,7 @@ async function renderOrdersBody() {
   const request = ++orderRequest;
   const version = pageVersion;
   const filters = new Set(orderFilters);
-  const query = new URLSearchParams({ days: String(currentRange), status: [...filters].join(',') });
+  const query = periodQuery({ status: [...filters].join(',') });
   $('orders-export').href = `/api/orders/export.csv?${query}`;
   setMessage('orders-notice', '加载中…');
   const res = await api(`/api/orders?${query}`);
@@ -550,7 +594,7 @@ async function renderRanking() {
   const version = pageVersion;
   const root = $('view-ranking');
   empty(root, '加载中…');
-  const res = await api(`/api/finance/ranking?days=${currentRange}&limit=10`);
+  const res = await api(`/api/finance/ranking?${periodQuery({ limit: '10' })}`);
   if (version !== pageVersion || !root.isConnected) return;
   if (res.status === 401) return showLogin();
   root.textContent = '';
@@ -558,7 +602,7 @@ async function renderRanking() {
 
   const items = res.data.items || [];
   const card = el('div', 'card glass');
-  card.appendChild(el('h3', '', `充值排行榜（近 ${currentRange} 天，前 ${items.length} 名）`));
+  card.appendChild(el('h3', '', `充值排行榜（所选区间，前 ${items.length} 名）`));
   if (!items.length) {
     card.appendChild(el('div', 'empty', '暂无成功订单'));
     root.appendChild(card);
@@ -591,7 +635,7 @@ async function renderUsers() {
   const days = currentRange;
   const root = $('view-users');
   empty(root, '加载中…');
-  const res = await api(`/api/finance/users?days=${days}`);
+  const res = await api(`/api/finance/users?${periodQuery()}`);
   if (version !== pageVersion || !root.isConnected) return;
   if (res.status === 401) return showLogin();
   if (!res.ok) return empty(root, res.data.error || '加载用户画像失败');
@@ -611,7 +655,7 @@ async function renderUsers() {
   const orders = items.reduce((sum, item) => sum + Number(item.orders || 0), 0);
   const kpis = el('div', 'kpi-grid');
   kpis.appendChild(kpi('周期充值用户', String(rechargeItems.length), '仅包含有成功订单的用户'));
-  kpis.appendChild(kpi('周期充值总额', fmtYuan(total), `近 ${days} 天`, true));
+  kpis.appendChild(kpi('周期充值总额', fmtYuan(total), periodLabel(), true));
   kpis.appendChild(kpi('周期成功订单', String(orders), '钱包充值 + 订阅开通'));
   kpis.appendChild(kpi('周期平均客单价', fmtYuan(orders ? total / orders : 0), '成功金额 / 成功订单笔数'));
   root.appendChild(kpis);
@@ -680,8 +724,7 @@ function renderUserRows(body, count, items, query, currency) {
     row.appendChild(el('td', '', formatTime(item.last_time)));
     row.appendChild(el('td', 'num', item.consumption ? fmtMoney(item.consumption.quota) : '—'));
     const consumption = el('td');
-    if (item.consumption) consumption.appendChild(userConsumptionDetails(item.consumption, currency));
-    else consumption.textContent = '暂无消费数据';
+    consumption.appendChild(userConsumptionDetails(item.consumption || { user_id: item.user_id, username: item.username }, currency, item));
     row.appendChild(consumption);
     body.appendChild(row);
   }
@@ -729,21 +772,125 @@ function currencyAmounts(amounts, value, currency) {
   return entries.length ? entries.map(([cur, amount]) => fmtMoney(amount, cur)).join(' / ') : fmtMoney(value, currency);
 }
 
-function userConsumptionDetails(user, currency) {
-  const details = el('details', 'finance-details');
-  const income = currencyAmounts(user.money_by_currency, user.money, currency);
-  details.appendChild(el('summary', '', `${income}${user.income_complete ? '' : '（部分已知）'}`));
-  for (const channel of user.channels || []) {
-    const cost = currencyAmounts(channel.cost_by_currency, channel.cost, currency);
-    const costLabel = channel.cost_configured ? cost : `${cost}（不完整）`;
-    details.appendChild(el('p', '', `${channel.name || `渠道#${channel.channel_id}`}（#${channel.channel_id}）：`
-      + `网站额度 ${fmtMoney(channel.website_units)} · raw quota ${fmtMoney(channel.quota)}`
-      + ` · 折算人民币 ${currencyAmounts(channel.money_by_currency, channel.money ?? channel.income, currency)}${channel.income_complete ? '' : '（不完整）'}`
-      + ` · 成本 ${costLabel} · 折算消费利润 ${fmtMoney(channel.profit, currency)}`
-      + ` · ${channel.complete ? '完整' : '不完整'}`));
+function userConsumptionDetails(user, currency, recharge) {
+  const button = el('button', 'btn small', '查看用户详情');
+  const interval = periodLabel();
+  button.addEventListener('click', () => {
+    const dialog = el('dialog', 'glass user-dialog');
+    const title = el('h2', '', `${user.username || `用户#${user.user_id}`} · 用户详情`);
+    title.id = 'user-detail-title';
+    dialog.setAttribute('aria-labelledby', title.id);
+    const close = el('button', 'btn', '关闭详情');
+    close.autofocus = true;
+    close.addEventListener('click', () => dialog.close());
+    const heading = el('div', 'dialog-heading');
+    heading.append(title, close);
+    dialog.append(heading, el('p', 'muted', `查询区间：${interval}（浏览器时区）；仅展示当前查询结果，不代表全生命周期。`));
+    const overview = el('div', 'kpi-grid');
+    overview.appendChild(kpi('充值总额', recharge ? fmtYuan(recharge.total) : '—', recharge ? `${recharge.orders} 笔成功订单` : '此页面未载入充值数据，请前往用户画像查询'));
+    if (recharge) {
+      overview.appendChild(kpi('钱包充值 / 订阅', `${fmtYuan(recharge.wallet)} / ${fmtYuan(recharge.subscription)}`, `平均客单价 ${fmtYuan(recharge.average)}`));
+    }
+    overview.appendChild(kpi('网站额度 / raw quota', fmtMoney(user.website_units), fmtMoney(user.quota)));
+    overview.appendChild(kpi('折算消费（分币种）', currencyAmounts(user.money_by_currency, user.money, currency), user.income_complete ? '人民币按对应渠道比例计算；其他币种不自动换算' : '金额仅包含已知部分，不等于零'));
+    dialog.appendChild(overview);
+    dialog.appendChild(el('p', user.income_complete ? 'ok' : 'bad', `${user.income_complete ? '收入折算完整' : '收入折算不完整或暂无消费数据'}；${(user.warnings || []).join('；') || '各渠道完整性见下表。'}`));
+    const body = financeTable(dialog, '各渠道消费结构', ['渠道', '网站额度', 'raw quota', '折算人民币 / 分币种金额', '成本 / 分币种', '利润', '完整性'], 'user-detail-channels');
+    for (const channel of user.channels || []) {
+      const row = el('tr');
+      for (const value of [
+        `${channel.name || '渠道'}（#${channel.channel_id}）`, fmtMoney(channel.website_units), fmtMoney(channel.quota),
+        currencyAmounts(channel.money_by_currency, channel.money ?? channel.income, currency) + (channel.income_complete ? '' : '（不完整）'),
+        currencyAmounts(channel.cost_by_currency, channel.cost, currency) + (channel.cost_configured ? '' : '（未完整配置）'),
+        fmtMoney(channel.profit, currency), `${channel.complete ? '完整' : '不完整'} ${(channel.warnings || []).join('；')}`,
+      ]) row.appendChild(el('td', '', value));
+      body.appendChild(row);
+    }
+    if (!body.children.length) tableEmpty(body, 7, '当前区间暂无渠道消费明细');
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      if (button.isConnected && button.closest('.view.active')) button.focus();
+    }, { once: true });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+  });
+  return button;
+}
+
+let financeChannels = [];
+let financeItems = [];
+let financeLoaded = false;
+
+function channelStatus(channel) {
+  return ({ 1: '启用', 2: '手动禁用', 3: '自动禁用' })[channel.status] || String(channel.status ?? '状态未知');
+}
+
+function renderChannelOptions() {
+  if (!financeLoaded) return;
+  const root = $('finance-channel-options');
+  root.textContent = '';
+  const term = $('cf-search').value.trim().toLocaleLowerCase();
+  const matches = financeChannels.filter((channel) => `${channel.id ?? channel.channel_id} ${channel.name || channel.channel_name || ''} ${channelStatus(channel)}`.toLocaleLowerCase().includes(term));
+  $('cf-count').textContent = `共 ${financeChannels.length} 个渠道 · 匹配 ${matches.length} 个`;
+  for (const channel of matches) {
+    const id = channel.id ?? channel.channel_id;
+    const name = channel.name || channel.channel_name || '';
+    const button = el('button', 'channel-option', `#${id} · ${name || '未命名'} · ${channelStatus(channel)}`);
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      $('cf-channel_id').value = id;
+      $('cf-channel_name').value = name;
+      const item = financeItems.find((item) => Number(item.channel_id) === Number(id));
+      $('cf-fee_rate').value = item && item.fee_currency === 'CNY' ? item.fee_rate : '';
+      $('cf-cost_currency').value = item ? item.cost_currency : 'CNY';
+      $('cf-cost_per_quota').value = item ? (item.cost_per_quota ?? '') : '';
+      updateRatePreview();
+      updateBackfillButton();
+      root.closest('details').open = false;
+      $('cf-channel_id').focus();
+    });
+    root.appendChild(button);
   }
-  if (user.warnings && user.warnings.length) details.appendChild(el('p', 'bad', user.warnings.join('；')));
-  return details;
+  if (!matches.length) empty(root, financeChannels.length ? '没有匹配渠道，可手动填写 ID' : '暂无渠道，可手动填写 ID');
+}
+
+function parsedFeeRate() {
+  return Number($('cf-fee_rate').value.trim().replace(/^1\s*[:：]\s*/, ''));
+}
+
+function updateRatePreview() {
+  const rate = parsedFeeRate();
+  const valid = Number.isFinite(rate) && rate > 0;
+  $('cf-fee_rate').setAttribute('aria-invalid', String(Boolean($('cf-fee_rate').value) && !valid));
+  $('cf-preview').textContent = valid ? `换算预览：¥1 = ${fmtMoney(rate)} 网站额度；1 网站额度 = ¥${fmtMoney(1 / rate)}；500000 raw quota = 1 网站额度。` : '填写正数充值比例查看换算，例如 1:7 或 7。';
+}
+
+function updateBackfillButton() {
+  if (!$('cf-backfill')) return;
+  const id = Number($('cf-channel_id').value);
+  $('cf-backfill').disabled = !financeLoaded || !financeItems.some((item) => Number(item.channel_id) === id);
+}
+
+async function backfillChannel() {
+  const id = Number($('cf-channel_id').value);
+  const version = pageVersion;
+  setMessage('cf-backfill-msg', '正在预览可补算历史…');
+  const preview = await api(`/api/channel-finance/backfill?channel_id=${id}`);
+  if (version !== pageVersion) return;
+  if (preview.status === 401) return showLogin();
+  if (!preview.ok) return setMessage('cf-backfill-msg', preview.data.error || '预览失败，请重试', 'bad');
+  const data = preview.data;
+  if (data.eligible !== true && !(typeof data.eligible === 'number' && data.eligible > 0)) return setMessage('cf-backfill-msg', data.message || '没有可补算的首次配置之前历史；已有配置及删除空档不会处理。');
+  if (!Number.isFinite(Number(data.start)) || !Number.isFinite(Number(data.end)) || Number(data.end) <= Number(data.start)) return setMessage('cf-backfill-msg', '预览未返回有效补算区间，无法确认执行', 'bad');
+  const message = `渠道 #${id}：可补算 [${formatTime(data.start)}, ${formatTime(data.end)})。仅补首次比例之前未配置历史，不覆盖已有配置或删除空档。${data.message || ''}`;
+  setMessage('cf-backfill-msg', message);
+  if (!confirm(`${message}\n确认执行？`)) return;
+  setMessage('cf-backfill-msg', '正在补算，请勿重复操作…');
+  const result = await api('/api/channel-finance/backfill', { method: 'POST', body: { channel_id: id, confirmed: true } });
+  if (version !== pageVersion) return;
+  if (result.status === 401) return showLogin();
+  setMessage('cf-backfill-msg', result.ok ? (result.data.message || '补算完成，仅处理首次配置之前未配置历史') : (result.data.error || '补算失败或结果未知，请先重新预览核对'), result.ok ? 'ok' : 'bad');
+  if (result.ok) await loadChannelFinance();
 }
 
 function buildChannelFinance(root) {
@@ -758,10 +905,35 @@ function buildChannelFinance(root) {
   ]) grid.appendChild(rateField(`cf-${key}`, label, '', hint));
   $('view-rates').appendChild(card);
   card.appendChild(grid);
-  const list = el('datalist');
+  const picker = el('details', 'channel-picker');
+  picker.appendChild(el('summary', '', '选择渠道 · 可搜索全部渠道'));
+  picker.appendChild(rateField('cf-search', '搜索渠道 ID / 名称 / 状态', '输入关键词', '选择后自动填写 ID 和名称；也可关闭选择器手填未知 ID。'));
+  const count = el('p', 'muted');
+  count.id = 'cf-count';
+  count.setAttribute('role', 'status');
+  const list = el('div', 'channel-options');
   list.id = 'finance-channel-options';
-  card.appendChild(list);
-  $('cf-channel_id').setAttribute('list', list.id);
+  list.setAttribute('role', 'group');
+  list.setAttribute('aria-label', '渠道选择结果');
+  const retry = el('button', 'btn small', '重新加载渠道');
+  retry.id = 'cf-retry';
+  retry.addEventListener('click', loadChannelFinance);
+  picker.append(count, list, retry);
+  card.insertBefore(picker, grid);
+  $('cf-search').type = 'search';
+  $('cf-search').addEventListener('input', renderChannelOptions);
+  $('cf-channel_id').inputMode = 'numeric';
+  $('cf-channel_id').addEventListener('input', () => {
+    const channel = financeChannels.find((item) => String(item.id ?? item.channel_id) === $('cf-channel_id').value.trim());
+    if (channel) $('cf-channel_name').value = channel.name || channel.channel_name || '';
+    updateBackfillButton();
+  });
+  const preview = el('p', 'conversion-preview');
+  preview.id = 'cf-preview';
+  preview.setAttribute('role', 'status');
+  card.appendChild(preview);
+  $('cf-fee_rate').addEventListener('input', updateRatePreview);
+  updateRatePreview();
   $('cf-fee_currency').value = 'CNY';
   $('cf-fee_currency').disabled = true;
   $('cf-cost_currency').value = 'CNY';
@@ -771,12 +943,25 @@ function buildChannelFinance(root) {
   const reset = el('button', 'btn ghost', '新建 / 清空');
   reset.addEventListener('click', () => {
     for (const key of ['channel_id', 'channel_name', 'fee_rate', 'cost_per_quota']) $(`cf-${key}`).value = '';
+    updateRatePreview();
+    updateBackfillButton();
+    setMessage('cf-backfill-msg', '');
   });
   const msg = el('span', 'muted');
   msg.id = 'cf-msg';
   msg.setAttribute('role', 'status');
   actions.append(save, reset, msg);
   card.appendChild(actions);
+  const backfillActions = el('div', 'actions');
+  const backfill = el('button', 'btn', '一键补算未配置历史');
+  backfill.id = 'cf-backfill';
+  backfill.disabled = true;
+  const backfillMessage = el('span', 'muted', '选择当前已配置渠道或保存新配置后可预览。仅补首次比例之前未配置历史，不覆盖已有配置或删除空档。');
+  backfillMessage.id = 'cf-backfill-msg';
+  backfillMessage.setAttribute('role', 'status');
+  backfillActions.append(backfill, backfillMessage);
+  card.appendChild(backfillActions);
+  bindBusyAction('cf-backfill', 'cf-backfill-msg', backfillChannel);
   financeTable(root, '当前渠道财务配置', ['渠道', '收费货币', '充值比例 1:N', '成本货币', '每 raw quota 成本', '生效时间', '操作'], 'cf-current');
   const history = el('details', 'finance-details');
   history.appendChild(el('summary', '', '查看渠道配置历史（只读）'));
@@ -786,7 +971,13 @@ function buildChannelFinance(root) {
     const body = {};
     for (const key of ['channel_id', 'channel_name', 'fee_currency', 'fee_rate', 'cost_currency', 'cost_per_quota']) body[key] = $(`cf-${key}`).value.trim();
     if (!/^\d+$/.test(body.channel_id) || Number(body.channel_id) <= 0) return setMessage('cf-msg', '请填写正整数渠道 ID', 'bad');
-    if (!body.fee_currency || !body.fee_rate || !body.cost_currency) return setMessage('cf-msg', '请填写收费货币、充值比例及成本货币', 'bad');
+    if (!Number.isSafeInteger(Number(body.channel_id))) return setMessage('cf-msg', '渠道 ID 超出有效范围', 'bad');
+    if (!Number.isFinite(parsedFeeRate()) || parsedFeeRate() <= 0) {
+      $('cf-fee_rate').focus();
+      return setMessage('cf-msg', '充值比例必须为正数，例如 1:7 或 7', 'bad');
+    }
+    if (!body.cost_currency || (body.cost_per_quota !== '' && (!Number.isFinite(Number(body.cost_per_quota)) || Number(body.cost_per_quota) < 0))) return setMessage('cf-msg', '请填写成本货币；成本须留空或填写非负数', 'bad');
+    body.fee_rate = String(parsedFeeRate());
     body.channel_id = Number(body.channel_id);
     body.cost_per_quota = body.cost_per_quota === '' ? null : body.cost_per_quota;
     await writeChannelFinance('/api/channel-finance', body);
@@ -808,17 +999,27 @@ async function writeChannelFinance(path, body) {
 async function loadChannelFinance() {
   const request = ++ratesRequest;
   const version = pageVersion;
+  financeLoaded = false;
+  updateBackfillButton();
+  $('cf-count').textContent = '正在加载全部渠道…';
+  empty($('finance-channel-options'), '加载中…');
   const res = await api('/api/channel-finance');
   if (request !== ratesRequest || version !== pageVersion) return;
   if (res.status === 401) return showLogin();
-  if (!res.ok) return setMessage('cf-msg', res.data.error || '读取渠道财务配置失败', 'bad');
-  const options = $('finance-channel-options');
-  options.textContent = '';
-  for (const channel of res.data.channels || []) {
-    const option = el('option', '', channel.name || channel.channel_name || '');
-    option.value = String(channel.id ?? channel.channel_id);
-    options.appendChild(option);
+  if (!res.ok) {
+    $('cf-count').textContent = '渠道加载失败，请重新加载；仍可手动填写 ID。';
+    empty($('finance-channel-options'), res.data.error || '读取渠道失败');
+    for (const id of ['cf-current', 'cf-history']) {
+      $(id).textContent = '';
+      tableEmpty($(id), 7, '读取失败，请重新加载');
+    }
+    return setMessage('cf-msg', res.data.error || '读取渠道财务配置失败', 'bad');
   }
+  financeLoaded = true;
+  financeChannels = res.data.channels || [];
+  financeItems = res.data.items || [];
+  renderChannelOptions();
+  updateBackfillButton();
   const body = $('cf-current');
   body.textContent = '';
   for (const item of res.data.items || []) {
@@ -831,6 +1032,8 @@ async function loadChannelFinance() {
       $('cf-fee_currency').value = 'CNY';
       $('cf-fee_rate').value = item.fee_currency === 'CNY' ? (item.fee_rate ?? '') : '';
       setMessage('cf-msg', item.fee_currency === 'CNY' ? '已载入配置' : '该历史配置使用非 CNY 收费币种，仅展示；新保存必须重新填写 CNY 充值比例', item.fee_currency === 'CNY' ? 'muted' : 'bad');
+      updateRatePreview();
+      updateBackfillButton();
       $('cf-channel_id').focus();
     });
     const remove = el('button', 'btn small ghost', '删除');
@@ -1080,7 +1283,11 @@ async function loadConsumption() {
   const request = ++consumptionRequest;
   const version = pageVersion;
   setMessage('consumption-msg', '加载中…');
-  const { ok, status, data } = await api(`/api/consumption?days=${currentRange}`);
+  for (const id of ['consumption-channels', 'consumption-users', 'consumption-top-users']) {
+    $(id).textContent = '';
+    tableEmpty($(id), id === 'consumption-channels' ? 6 : 3, '加载中…');
+  }
+  const { ok, status, data } = await api(`/api/consumption?${periodQuery()}`);
   if (request !== consumptionRequest || version !== pageVersion) return;
   if (status === 401) return showLogin();
   if (!ok) {
@@ -1102,7 +1309,7 @@ function renderConsumptionKpis(data) {
   if (!kpis) return;
   kpis.textContent = '';
   const currency = data.currency || 'CNY';
-  kpis.appendChild(kpi('网站额度消耗', `${fmtMoney(data.website_units)} · raw quota ${fmtMoney(data.quota)}`, `近 ${currentRange} 天`));
+  kpis.appendChild(kpi('网站额度消耗', `${fmtMoney(data.website_units)} · raw quota ${fmtMoney(data.quota)}`, periodLabel()));
   kpis.appendChild(kpi('用户消耗金额', fmtMoney(data.user_money, currency), '汇总货币已知收入；其他币种见渠道明细', true));
   kpis.appendChild(kpi('上游渠道成本', fmtMoney(data.upstream_cost, currency), '汇总货币已知成本，不含缺失部分'));
   kpis.appendChild(kpi('折算消费利润', fmtMoney(data.profit, currency), data.complete ? '折算收入减去成本' : '配置缺失或跨币种，无法准确计算'));
@@ -1743,6 +1950,24 @@ function bindSettingsActions() {
 /* ---------- 启动 ---------- */
 
 function bind() {
+  for (const id of ['period-start', 'period-end']) {
+    $(id).addEventListener('input', () => {
+      $('period-end').setCustomValidity('');
+      setMessage('period-error', '');
+    });
+  }
+  $('period-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const start = new Date($('period-start').value).getTime() / 1000;
+    const end = new Date($('period-end').value).getTime() / 1000;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      $('period-end').setCustomValidity('结束时间必须晚于开始时间');
+      $('period-end').reportValidity();
+      return setMessage('period-error', '结束时间必须晚于开始时间', 'bad');
+    }
+    applyPeriod(start, end, true);
+    renderCurrent();
+  });
   $('login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     setMessage('login-error', '');
