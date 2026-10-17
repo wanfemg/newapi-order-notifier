@@ -6,6 +6,7 @@
 import calendar
 import csv
 from datetime import date, timedelta
+from decimal import Decimal
 import io
 import json
 import os
@@ -23,7 +24,10 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(BASE, "app"))
 
 import config as config_module  # noqa: E402
+import consume_monitor as consume_monitor_module  # noqa: E402
+import consumption as consumption_module  # noqa: E402
 import poller as poller_module  # noqa: E402
+import rates as rates_module  # noqa: E402
 import report as report_module  # noqa: E402
 import source as source_module  # noqa: E402
 import store as store_module  # noqa: E402
@@ -115,6 +119,37 @@ def add_subscription_order(db_path, user_id, plan_id, trade_no, status, provider
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (user_id, plan_id, 199.0, trade_no, method, provider, status, now,
          now if status == "success" else 0, payload))
+    conn.commit()
+    conn.close()
+
+
+def build_consume_db(path):
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, display_name TEXT);
+        CREATE TABLE channels (id INTEGER PRIMARY KEY, name TEXT, type TEXT,
+            models TEXT, status INTEGER);
+        CREATE TABLE logs (id INTEGER PRIMARY KEY, user_id INTEGER, channel_id INTEGER,
+            type INTEGER, quota INTEGER, created_at INTEGER);
+    """)
+    conn.execute("INSERT INTO users (id, username, display_name) VALUES (1, 'alice', '爱丽丝')")
+    conn.execute("INSERT INTO users (id, username, display_name) VALUES (2, 'bob', '鲍勃')")
+    conn.execute("INSERT INTO channels (id, name, type, models, status) "
+                 "VALUES (1, 'OpenAI', 'openai', 'gpt-4o', 1)")
+    conn.execute("INSERT INTO channels (id, name, type, models, status) "
+                 "VALUES (2, 'Anthropic', 'anthropic', 'claude-3', 1)")
+    conn.execute("INSERT INTO channels (id, name, type, models, status) "
+                 "VALUES (3, 'Google', 'google', 'gemini', 1)")
+    conn.commit()
+    conn.close()
+
+
+def add_consume_log(db_path, log_id, user_id, channel_id, quota, created):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO logs (id, user_id, channel_id, type, quota, created_at) "
+        "VALUES (?, ?, ?, 2, ?, ?)",
+        (log_id, user_id, channel_id, quota, created))
     conn.commit()
     conn.close()
 
@@ -361,7 +396,7 @@ def main():
     })
     store3.set_admin_hash(webui_module.hash_password(password))
     httpd = webui_module.build_server(
-        store3, poller, report_module.DailyReporter(store3), "127.0.0.1", 0)
+        store3, poller, report_module.DailyReporter(store3), None, "127.0.0.1", 0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
 
@@ -422,7 +457,7 @@ def main():
     store4.set_configs({"db_type": "sqlite", "sqlite_path": db_path})
     store4.set_admin_hash(webui_module.hash_password(password))
     httpd4 = webui_module.build_server(
-        store4, poller, report_module.DailyReporter(store4), "127.0.0.1", 0)
+        store4, poller, report_module.DailyReporter(store4), None, "127.0.0.1", 0)
     threading.Thread(target=httpd4.serve_forever, daemon=True).start()
     base4 = f"http://127.0.0.1:{httpd4.server_address[1]}"
     cookie4 = ""
@@ -864,6 +899,159 @@ def main():
     with sqlite3.connect(noise_db) as conn:
         check(list(conn.iterdump()) == noise_source_before, "金额过滤与推送均不改变源库")
     httpd4.shutdown()
+
+    print("\n28) 汇率解析：1:X 输入、货币规范与金额精度")
+    check(rates_module.parse_rate("1:7") == Decimal("7"), "1:7 解析为 7")
+    check(rates_module.parse_rate("7") == Decimal("7"), "纯数字 7 解析为 7")
+    check(rates_module.parse_rate("1:7.5") == Decimal("7.5"), "1:7.5 解析为 7.5")
+    check(rates_module.parse_rate("2:14") == Decimal("7"), "2:14 折算为 7")
+    for bad in ("", "0", "1:0", "abc", "-1"):
+        try:
+            rates_module.parse_rate(bad)
+            check(False, f"非法汇率 {bad!r} 应抛 ValueError")
+        except ValueError:
+            check(True, f"非法汇率 {bad!r} 抛 ValueError")
+    check(rates_module.parse_cost("0.01") == Decimal("0.01"), "成本单价 0.01 解析正确")
+    check(rates_module.normalize_currency(" cny ") == "CNY", "货币种类去空格并大写")
+    check(rates_module.fmt_money(Decimal("200") / Decimal("7")) == "28.571429",
+          "金额六位小数并去掉末尾零")
+
+    print("\n29) 汇率保存：历史记录与调整通知文案")
+    rate_store = store_module.Store(os.path.join(tmp, "rate.db"))
+    first = rates_module.save_rate(rate_store, "CNY", "7")
+    check(first == ("", "7", "CNY"), "首次保存汇率返回空旧值")
+    check(rate_store.rate_history("CNY", 10)[0]["old_rate"] == "0",
+          "首次历史记录旧汇率为 0")
+    second = rates_module.save_rate(rate_store, "CNY", "7.5")
+    check(second == ("7", "7.5", "CNY"), "再次保存返回旧值 7 新值 7.5")
+    check([(h["old_rate"], h["new_rate"]) for h in rate_store.rate_history("CNY", 10)]
+          == [("7", "7.5"), ("0", "7")], "历史倒序记录两次调整")
+    title, text = rates_module.render_rate_change("CNY", "0", "7")
+    check("旧汇率**：-" in text and "新汇率**：1:7" in text, "汇率调整文案含旧汇率与新汇率")
+
+    print("\n30) 消耗统计：用户消耗金额、上游渠道成本与排行")
+    consume_db = os.path.join(tmp, "consume-source.db")
+    build_consume_db(consume_db)
+    add_consume_log(consume_db, 1, 1, 1, 70, 1000)   # alice ch1 70
+    add_consume_log(consume_db, 2, 1, 2, 20, 1000)   # alice ch2 20
+    add_consume_log(consume_db, 3, 2, 1, 10, 1000)   # bob ch1 10
+    add_consume_log(consume_db, 4, 2, 3, 100, 1000)  # bob ch3 100
+    consume_store = store_module.Store(os.path.join(tmp, "consume-state.db"))
+    consume_store.set_configs({"db_type": "sqlite", "sqlite_path": consume_db,
+                               "rate_currency": "CNY"})
+    consume_store.set_exchange_rate("CNY", "7")
+    consume_store.set_channel_cost(1, "0.01", "CNY")
+    consume_store.set_channel_cost(2, "0.02", "CNY")
+    consume_source = source_module.SourceDB(config_module.effective_config(consume_store))
+    cstats = consumption_module.compute(consume_store, consume_source, 0, 10 ** 12, "CNY")
+    check(cstats["quota"] == 200, "总消耗额度 200")
+    check(cstats["user_money"] == "28.571429", "用户消耗金额 200/7 = 28.571429")
+    check(cstats["upstream_cost"] == "1.2", "上游成本 80*0.01 + 20*0.02 = 1.2")
+    check([(c["channel_id"], c["quota"], c["cost"], c["cost_currency"])
+           for c in cstats["channels"]] ==
+          [(3, 100, "0", "CNY"), (1, 80, "0.8", "CNY"), (2, 20, "0.4", "CNY")],
+          "渠道按额度降序且成本口径正确")
+    check([(u["user_id"], u["quota"], u["money"]) for u in cstats["users"]] ==
+          [(2, 110, "15.714286"), (1, 90, "12.857143")],
+          "用户按额度降序且金额 = 额度/汇率")
+
+    print("\n31) 消耗监控：变动通知、阈值通知与水位推进")
+    monitor_db = os.path.join(tmp, "monitor-source.db")
+    build_consume_db(monitor_db)
+    monitor_store = store_module.Store(os.path.join(tmp, "monitor-state.db"))
+    monitor_store.set_configs({
+        "db_type": "sqlite", "sqlite_path": monitor_db,
+        "dingtalk_webhook": webhook, "rate_currency": "CNY",
+        "consume_enabled": True, "consume_interval": 600,
+        "consume_threshold_quota": 100, "consume_change_quota": 50,
+    })
+    monitor_store.set_exchange_rate("CNY", "7")
+    monitor = consume_monitor_module.ConsumptionMonitor(monitor_store)
+    before = len(RECEIVED)
+    clock = [1000]
+    with patch.object(consume_monitor_module.time, "time", side_effect=lambda: clock[0]):
+        check(monitor.run_once() == 0, "首次运行只落水位，不推送历史消耗")
+        add_consume_log(monitor_db, 1, 1, 1, 60, 1500)
+        clock[0] = 2000
+        check(monitor.run_once() == 1, "单次新增 60 额度达到变动阈值推送一次")
+        check(monitor_store.get_state(consume_monitor_module.CUMULATIVE_KEY) == "60",
+              "累计消耗累计到 60")
+        add_consume_log(monitor_db, 2, 2, 2, 40, 2500)
+        clock[0] = 3000
+        check(monitor.run_once() == 1, "累计 100 额度达到阈值推送一次")
+        check(monitor_store.get_state(consume_monitor_module.CUMULATIVE_KEY) == "0",
+              "达到阈值后累计清零")
+        add_consume_log(monitor_db, 3, 1, 1, 60, 3500)
+        clock[0] = 4000
+        check(monitor.run_once() == 1, "阈值清零后再次新增 60 额度触发变动通知")
+        check(monitor_store.get_state(consume_monitor_module.CUMULATIVE_KEY) == "60",
+              "清零后重新累计 60")
+    messages = RECEIVED[before:]
+    check(len(messages) == 3, "三轮消耗推送了 3 条消息")
+    check(any("累计消耗额度**：100" in item["markdown"]["text"] for item in messages),
+          "阈值消息附带累计消耗额度 100")
+
+    print("\n32) 消耗 HTTP 接口：汇率保存、渠道成本与消耗统计")
+    consume_http_db = os.path.join(tmp, "consume-http-source.db")
+    build_consume_db(consume_http_db)
+    add_consume_log(consume_http_db, 1, 1, 1, 900, int(time.time()))
+    store5 = store_module.Store(os.path.join(tmp, "consume-http.db"))
+    store5.set_configs({"db_type": "sqlite", "sqlite_path": consume_http_db,
+                        "dingtalk_webhook": webhook, "rate_currency": "CNY"})
+    store5.set_admin_hash(webui_module.hash_password(password))
+    httpd5 = webui_module.build_server(
+        store5, poller, report_module.DailyReporter(store5), None, "127.0.0.1", 0)
+    threading.Thread(target=httpd5.serve_forever, daemon=True).start()
+    base5 = f"http://127.0.0.1:{httpd5.server_address[1]}"
+    cookie5 = ""
+
+    def post5(path, body):
+        request = urllib.request.Request(base5 + path, data=json.dumps(body).encode(),
+                                         method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header(webui_module.CSRF_HEADER, webui_module.CSRF_VALUE)
+        if cookie5:
+            request.add_header("Cookie", cookie5)
+        return request
+
+    def get5(path):
+        return urllib.request.Request(base5 + path, headers={"Cookie": cookie5})
+
+    with urllib.request.urlopen(post5("/api/login", {"password": password}), timeout=10) as resp:
+        cookie5 = resp.headers["Set-Cookie"].split(";")[0]
+
+    status_code, payload = call(get5("/api/rates"))
+    check(status_code == 200 and payload["rates"] == [] and payload["history"] == [],
+          "初始汇率列表与历史均为空")
+    status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7"}))
+    check(status_code == 200 and payload["ok"] and not payload["changed"]
+          and not payload["notified"], "首次保存汇率不触发通知")
+    status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7.5"}))
+    check(status_code == 200 and payload["changed"] and payload["notified"],
+          "调整汇率触发通知")
+    status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "0"}))
+    check(status_code == 400, "非法汇率返回 400")
+
+    status_code, payload = call(get5("/api/channels"))
+    check(status_code == 200 and len(payload["channels"]) == 3, "渠道列表返回 3 条")
+    status_code, payload = call(post5("/api/cost", {"channel_id": 1, "cost_per_unit": "0.01"}))
+    check(status_code == 200 and payload.get("ok"), "保存渠道成本单价")
+    status_code, payload = call(get5("/api/channels"))
+    ch1 = [c for c in payload["channels"] if c["id"] == 1][0]
+    check(ch1["cost_per_unit"] == "0.01" and ch1["cost_currency"] == "CNY",
+          "渠道成本回显为保存值")
+    status_code, payload = call(post5("/api/cost/delete", {"channel_id": 1}))
+    check(status_code == 200 and payload.get("ok"), "删除渠道成本单价")
+    status_code, payload = call(get5("/api/channels"))
+    ch1 = [c for c in payload["channels"] if c["id"] == 1][0]
+    check(ch1["cost_per_unit"] == "", "删除后成本单价为空")
+
+    status_code, payload = call(get5("/api/consumption?days=1"))
+    check(status_code == 200 and payload["rate"] == "7.5" and payload["quota"] == 900
+          and payload["user_money"] == "120" and payload["upstream_cost"] == "0"
+          and payload["has_rate"] is True,
+          "消耗统计按最新汇率 7.5 计算，900 额度 = 120 元")
+    httpd5.shutdown()
 
     failed = [label for ok, label in CHECKS if not ok]
     print("\n" + "=" * 56)

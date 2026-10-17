@@ -19,7 +19,9 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config as config_module
+import consumption as consumption_module
 import finance as finance_module
+import rates as rates_module
 from notify import send_markdown
 from poller import pay_method_label
 from source import SourceDB
@@ -215,6 +217,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._orders()
         if path == "/api/orders/export.csv":
             return self._orders_export()
+        if path == "/api/rates":
+            return self._rates()
+        if path == "/api/channels":
+            return self._channels()
+        if path == "/api/consumption":
+            return self._consumption()
         return self._json({"error": "接口不存在"}, 404)
 
     def do_POST(self):
@@ -243,6 +251,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/history/clear":
             self.server.store.clear_history()
             return self._json({"ok": True})
+        if path == "/api/rates":
+            return self._save_rate()
+        if path == "/api/cost":
+            return self._save_cost()
+        if path == "/api/cost/delete":
+            return self._delete_cost()
         return self._json({"error": "接口不存在"}, 404)
 
     # ---------- 业务 ----------
@@ -308,6 +322,89 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._json({"ok": False, "detail": str(exc)}, 400)
         return self._json({"ok": True, "detail": detail})
+
+    # ---------- 汇率 / 渠道成本 / 消耗统计 ----------
+
+    def _rates(self):
+        config = config_module.effective_config(self.server.store)
+        return self._json({
+            "currency": config["rate_currency"],
+            "rates": self.server.store.exchange_rates(),
+            "history": self.server.store.rate_history(None, 100),
+        })
+
+    def _save_rate(self):
+        body = self._read_json() or {}
+        currency = str(body.get("currency") or "").strip()
+        note = str(body.get("note") or "").strip()
+        try:
+            old_str, new_str, currency = rates_module.save_rate(
+                self.server.store, currency, body.get("rate"), note=note)
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        changed = old_str and old_str != new_str
+        notified = False
+        detail = ""
+        if changed:
+            title, text = rates_module.render_rate_change(currency, old_str, new_str, note)
+            config = config_module.effective_config(self.server.store)
+            if config["dingtalk_webhook"]:
+                ok, detail = send_markdown(
+                    config["dingtalk_webhook"], title, text,
+                    secret=config["dingtalk_secret"], keyword=config["dingtalk_keyword"],
+                    at_mobiles=[m for m in (config["dingtalk_at_mobiles"] or "").split(",")
+                                if m.strip()],
+                )
+                notified = ok
+        return self._json({
+            "ok": True, "currency": currency, "changed": changed,
+            "notified": notified, "detail": detail,
+        })
+
+    def _channels(self):
+        config = config_module.effective_config(self.server.store)
+        try:
+            channels = SourceDB(config).channels()
+        except Exception as exc:
+            return self._json({"error": f"读取渠道失败：{exc}"}, 500)
+        costs = {int(row["channel_id"]): row for row in self.server.store.channel_costs()}
+        for channel in channels:
+            cost = costs.get(int(channel["id"]))
+            channel["cost_per_unit"] = cost["cost_per_unit"] if cost else ""
+            channel["cost_currency"] = cost["currency"] if cost else "CNY"
+        return self._json({"channels": channels})
+
+    def _save_cost(self):
+        body = self._read_json() or {}
+        try:
+            channel_id = int(body.get("channel_id"))
+        except (TypeError, ValueError):
+            return self._json({"error": "渠道 ID 需要是整数"}, 400)
+        cost_per_unit = rates_module.parse_cost(body.get("cost_per_unit"))
+        currency = rates_module.normalize_currency(body.get("cost_currency") or "CNY")
+        self.server.store.set_channel_cost(channel_id, str(cost_per_unit), currency)
+        return self._json({"ok": True, "channel_id": channel_id})
+
+    def _delete_cost(self):
+        body = self._read_json() or {}
+        try:
+            channel_id = int(body.get("channel_id"))
+        except (TypeError, ValueError):
+            return self._json({"error": "渠道 ID 需要是整数"}, 400)
+        self.server.store.delete_channel_cost(channel_id)
+        return self._json({"ok": True, "channel_id": channel_id})
+
+    def _consumption(self):
+        days = self._qint("days", 7, 1, 365)
+        config = config_module.effective_config(self.server.store)
+        start, end = finance_module.range_window(days)
+        try:
+            stats = consumption_module.compute(
+                self.server.store, SourceDB(config), int(start), int(end),
+                config["rate_currency"])
+        except Exception as exc:
+            return self._json({"error": f"读取消耗数据失败：{exc}"}, 500)
+        return self._json(stats)
 
     def _status(self):
         status = dict(self.server.poller.status)
@@ -592,15 +689,16 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def build_server(store, poller, reporter, bind, port):
+def build_server(store, poller, reporter, monitor, bind, port):
     server = Server((bind, port), Handler)
     server.store = store
     server.poller = poller
     server.reporter = reporter
+    server.monitor = monitor
     server.sessions = Sessions()
     server.limiter = LoginLimiter()
     return server
 
 
-def serve(store, poller, reporter, bind, port):
-    build_server(store, poller, reporter, bind, port).serve_forever()
+def serve(store, poller, reporter, monitor, bind, port):
+    build_server(store, poller, reporter, monitor, bind, port).serve_forever()

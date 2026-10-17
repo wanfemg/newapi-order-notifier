@@ -40,6 +40,25 @@ CREATE TABLE IF NOT EXISTS runtime_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS exchange_rates (
+    currency   TEXT PRIMARY KEY,
+    rate       TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS exchange_rate_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    currency   TEXT NOT NULL,
+    old_rate   TEXT NOT NULL,
+    new_rate   TEXT NOT NULL,
+    changed_at INTEGER NOT NULL,
+    note       TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS channel_costs (
+    channel_id    INTEGER PRIMARY KEY,
+    cost_per_unit TEXT NOT NULL,
+    currency      TEXT NOT NULL DEFAULT 'CNY',
+    updated_at    INTEGER NOT NULL
+);
 """
 
 HISTORY_KEEP = 500
@@ -168,3 +187,70 @@ class Store:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, str(value)),
         )
+
+    # ---------- 汇率 ----------
+
+    def exchange_rates(self):
+        return [dict(row) for row in self._read(
+            "SELECT currency, rate, updated_at FROM exchange_rates ORDER BY currency")]
+
+    def get_exchange_rate(self, currency):
+        rows = self._read(
+            "SELECT rate FROM exchange_rates WHERE currency = ?", (currency,))
+        return rows[0]["rate"] if rows else ""
+
+    def set_exchange_rate(self, currency, rate):
+        """写入当前汇率，返回旧值（无旧值返回空串）。rate 为 decimal 字符串。"""
+        old = self.get_exchange_rate(currency)
+        self._write(
+            "INSERT INTO exchange_rates (currency, rate, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(currency) DO UPDATE SET rate = excluded.rate, "
+            "updated_at = excluded.updated_at",
+            (currency, str(rate), int(time.time())),
+        )
+        return old
+
+    def add_rate_history(self, currency, old_rate, new_rate, note=""):
+        self._write(
+            "INSERT INTO exchange_rate_history "
+            "(currency, old_rate, new_rate, changed_at, note) VALUES (?, ?, ?, ?, ?)",
+            (currency, str(old_rate), str(new_rate), int(time.time()), note or ""),
+        )
+
+    def rate_history(self, currency=None, limit=200):
+        if currency:
+            rows = self._read(
+                "SELECT * FROM exchange_rate_history WHERE currency = ? "
+                "ORDER BY id DESC LIMIT ?",
+                (currency, int(limit)),
+            )
+        else:
+            rows = self._read(
+                "SELECT * FROM exchange_rate_history ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+        return [dict(row) for row in rows]
+
+    # ---------- 渠道成本单价 ----------
+
+    def channel_costs(self):
+        return [dict(row) for row in self._read(
+            "SELECT channel_id, cost_per_unit, currency, updated_at "
+            "FROM channel_costs ORDER BY channel_id")]
+
+    def get_channel_cost(self, channel_id):
+        rows = self._read(
+            "SELECT * FROM channel_costs WHERE channel_id = ?", (int(channel_id),))
+        return dict(rows[0]) if rows else None
+
+    def set_channel_cost(self, channel_id, cost_per_unit, currency="CNY"):
+        self._write(
+            "INSERT INTO channel_costs (channel_id, cost_per_unit, currency, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(channel_id) DO UPDATE SET cost_per_unit = excluded.cost_per_unit, "
+            "currency = excluded.currency, updated_at = excluded.updated_at",
+            (int(channel_id), str(cost_per_unit), currency or "CNY", int(time.time())),
+        )
+
+    def delete_channel_cost(self, channel_id):
+        self._write("DELETE FROM channel_costs WHERE channel_id = ?", (int(channel_id),))

@@ -43,6 +43,12 @@ DEFAULTS = {
     # 每天 00:00 推送前一天的充值统计与排行榜
     "daily_report": True,
     "weekly_report": True,
+    # 站点充值汇率与消耗统计（只读 new-api，成本单价与汇率存本程序自己的库）
+    "rate_currency": "CNY",   # 用户消耗金额的计价货币（1 rate_currency = X 额度）
+    "consume_enabled": False,  # 是否开启消耗统计自动通知
+    "consume_interval": 600,   # 消耗统计检查间隔（秒）
+    "consume_threshold_quota": 0,  # 累计额度达到该值触发阈值通知，0 表示关闭
+    "consume_change_quota": 0,     # 单次新增额度达到该值触发变动通知，0 表示关闭
 }
 
 # 敏感项：界面只回显占位文案，提交该文案或空值时保持已保存的值
@@ -54,12 +60,13 @@ ENV_KEYS = ("db_type", "db_dsn", "sqlite_path", "poll_interval")
 BOOL_KEYS = {
     "enabled", "push_success", "push_failed",
     "push_expired", "scope_wallet", "scope_subscription", "backfill", "daily_report",
-    "weekly_report",
+    "weekly_report", "consume_enabled",
 }
-INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes"}
+INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes", "consume_interval",
+            "consume_threshold_quota", "consume_change_quota"}
 FLOAT_KEYS = {"large_order_threshold", "min_push_amount"}
 STR_KEYS = {"dingtalk_webhook", "dingtalk_secret", "dingtalk_keyword",
-            "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path"}
+            "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path", "rate_currency"}
 
 DB_TYPES = ("postgres", "mysql", "sqlite")
 
@@ -220,6 +227,10 @@ def validate(config):
         errors.append("回溯窗口不能小于 1 小时")
     if not 0 <= config["expire_minutes"] <= 10080:
         errors.append("超时判定分钟数需要在 0 ~ 10080 之间（0 表示关闭推导）")
+    if not config["rate_currency"]:
+        errors.append("汇率基准货币不能为空")
+    if not 10 <= config["consume_interval"] <= 86400:
+        errors.append("消耗统计检查间隔需要在 10 ~ 86400 秒之间")
     for key in FLOAT_KEYS:
         try:
             coerce(key, config[key])
