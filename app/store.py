@@ -488,6 +488,13 @@ class Store:
             "SELECT * FROM finance_overrides" + where + " ORDER BY id DESC",
             (int(channel_id),) if channel_id is not None else ())]
 
+    def finance_initialization_snapshot(self, end):
+        with self._lock:
+            site = self.find_site_rate(end)
+            channels = [(item, self.current_channel_snapshot(item["channel_id"]))
+                        for item in self.list_channel_finance()]
+            return site, channels
+
     def save_finance_preview(self, payload):
         import secrets
         token = secrets.token_urlsafe(32)

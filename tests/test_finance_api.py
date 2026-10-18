@@ -92,6 +92,107 @@ class FinanceAPITest(unittest.TestCase):
         body.update(overrides)
         return self.call("/api/channel-finance", body)
 
+    def wait_initialization(self):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = self.call("/api/channel-finance/initialize")[1]
+            if state["status"] != "running":
+                return state
+            time.sleep(0.01)
+        self.fail("初始化未在规定时间内结束")
+
+    def test_initialization_security_validation_and_idle(self):
+        path = "/api/channel-finance/initialize"
+        state = self.call(path)[1]
+        self.assertEqual(state["status"], "idle")
+        self.assertIn("重启", state["error"])
+        self.assertEqual(self.call(path, auth=False)[0], 401)
+        self.assertEqual(self.call(path, {}, auth=False)[0], 401)
+        self.assertEqual(self.call(path, {}, csrf=False)[0], 403)
+        self.assertEqual(self.call(path, {}, content_type="text/plain")[0], 403)
+        for raw in (b"[]", b"null", b"false", b"{", b'{"confirmed":true}'):
+            self.assertEqual(self.call(path, raw=raw)[0], 400)
+        self.assertEqual(self.call(path, {})[0], 400)
+        self.assertEqual(self.call(path)[1]["status"], "idle")
+
+    def test_initialization_multiple_channels_recalculates_old_overrides(self):
+        path = "/api/channel-finance/initialize"
+        self.store.save_site_rate("7", effective_at=self.now - 1)
+        for cid in (3, 1, 2, 4):
+            self.store.upsert_channel_finance(cid, f"渠道{cid}", "CNY", "14", "CNY", "0",
+                                              self.now - 1)
+        self.store._write("UPDATE channel_finance_history SET fee_rate='NaN' WHERE channel_id=4")
+        with closing(sqlite3.connect(self.source_path)) as conn, conn:
+            conn.execute("INSERT INTO logs VALUES (2, 2, 2, 2, 500000, ?)", (self.now - 10,))
+            before = list(conn.iterdump())
+        with patch.object(webui.time, "time", return_value=self.now + 10):
+            self.assertEqual(self.call(path, {})[0], 202)
+            state = self.wait_initialization()
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual([r["channel_id"] for r in state["results"]], [1, 2, 3, 4])
+        self.assertEqual((state["total"], state["completed"], state["success"],
+                          state["skipped"], state["failed"]), (4, 4, 2, 2, 0))
+        self.assertTrue(all(r["end_ts"] == self.now + 10 for r in self.store.finance_overrides()))
+        old_id = self.store.finance_override(1, self.now)["id"]
+        self.store.upsert_channel_finance(1, "渠道1", "CNY", "21", "CNY", "0", self.now)
+        with patch.object(webui.time, "time", return_value=self.now + 20):
+            self.assertEqual(self.call(path, {})[0], 202)
+            self.wait_initialization()
+        override = self.store.finance_override(1, self.now)
+        self.assertGreater(override["id"], old_id)
+        self.assertEqual(override["channel_rate"], "21")
+        with closing(sqlite3.connect(self.source_path)) as conn:
+            self.assertEqual(list(conn.iterdump()), before)
+
+    def test_initialization_duplicate_start_progress_and_failure_continues(self):
+        path = "/api/channel-finance/initialize"
+        self.store.save_site_rate("7", effective_at=self.now - 1)
+        for cid in (1, 2, 3):
+            self.store.upsert_channel_finance(cid, f"渠道{cid}", "CNY", "14", "CNY", "0",
+                                              self.now - 1)
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        def summary(source_db, cid, end):
+            calls.append((cid, end))
+            if cid == 1:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("等待超时")
+                raise RuntimeError("源查询失败")
+            return {"first_at": 0, "quota": cid * 500000}
+
+        with patch.object(source.SourceDB, "channel_consumption_summary", summary):
+            try:
+                status, state, _ = self.call(path, {})
+                self.assertEqual(status, 202)
+                self.assertTrue(entered.wait(5))
+                running = self.call(path)[1]
+                self.assertEqual(running["completed"], 0)
+                self.assertEqual(running["current_channel"]["channel_id"], 1)
+                self.assertEqual(self.call(path, {})[1], running)
+                self.store.upsert_channel_finance(2, "changed", "CNY", "28", "CNY", "0",
+                                                  self.now)
+            finally:
+                release.set()
+            state = self.wait_initialization()
+        self.assertEqual([cid for cid, end in calls], [1, 2, 3])
+        self.assertEqual(len({end for cid, end in calls}), 1)
+        self.assertEqual((state["completed"], state["success"], state["failed"]), (3, 1, 2))
+        self.assertIn("比例已变化", state["results"][1]["message"])
+        self.assertEqual([r["channel_id"] for r in self.store.finance_overrides()], [3])
+
+    def test_initialization_thread_start_failure_allows_retry(self):
+        self.store.save_site_rate("7", effective_at=self.now - 1)
+        task = self.server.finance_initializer
+        with patch("finance_init.threading.Thread.start", side_effect=RuntimeError("无法启动")):
+            with self.assertRaises(RuntimeError):
+                task.start()
+        self.assertEqual(task.status()["status"], "failed")
+        self.assertIn("无法启动", task.status()["error"])
+        task.start()
+        self.assertEqual(self.wait_initialization()["status"], "completed")
+
     def test_explicit_ranges_and_validation(self):
         paths = ("/api/finance/summary", "/api/finance/trend", "/api/finance/ranking",
                  "/api/finance/users", "/api/orders", "/api/orders/export.csv", "/api/consumption")

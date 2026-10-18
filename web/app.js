@@ -866,43 +866,79 @@ function updateRatePreview() {
   $('cf-preview').textContent = valid ? `换算预览：¥1 = ${fmtMoney(rate)} 网站额度；1 网站额度 = ¥${fmtMoney(1 / rate)}；500000 raw quota = 1 网站额度。` : '填写正数渠道成本比例查看换算，例如 1:7 或 7。';
 }
 
+let financeInitRunning = false;
+let financeInitPoll = 0;
+
 function updateBackfillButton() {
   const button = $('cf-backfill');
   if (!button) return;
-  const id = Number($('cf-channel_id').value);
-  const configured = financeItems.some((item) => Number(item.channel_id) === id);
-  const busy = button.getAttribute('aria-busy') === 'true';
-  button.disabled = busy || !financeLoaded || !configured;
-  button.title = busy ? '正在处理，请稍候' : !financeLoaded ? '请先成功加载渠道配置' : !configured ? '请先选择已保存比例的渠道，或点击下方配置的“修改”载入渠道' : '预览并确认该渠道的全部历史重算';
-  if (!busy) button.textContent = configured && financeLoaded ? `全量重算渠道 #${id} · 先预览` : '全量重算历史 · 请先选择已配置渠道';
+  const busy = financeInitRunning || button.getAttribute('aria-busy') === 'true';
+  button.disabled = busy || !financeLoaded || !financeItems.length;
+  button.title = '按已保存的最新比例，依次重算所有已配置渠道的历史财务；无需选择渠道';
+  button.textContent = busy ? '正在逐渠道初始化…' : '一键初始化历史财务';
+}
+
+function renderFinanceInit(data) {
+  financeInitRunning = data.status === 'running';
+  updateBackfillButton();
+  const done = Number(data.completed || 0);
+  const total = Number(data.total || 0);
+  const percent = total ? Math.floor(done / total * 100) : data.status === 'completed' ? 100 : 0;
+  $('cf-init-progress').value = percent;
+  $('cf-init-percent').textContent = `${percent}%`;
+  $('cf-init-count').textContent = `${done} / ${total} 个渠道`;
+  $('cf-init-summary').textContent = `成功 ${data.success || 0} · 跳过 ${data.skipped || 0} · 失败 ${data.failed || 0}`;
+  const current = data.current_channel;
+  const titles = { idle: '准备就绪', running: '正在逐渠道重算', completed: '初始化处理完成', failed: '初始化未完成' };
+  $('cf-init-state').textContent = titles[data.status] || '获取状态中';
+  $('cf-init-current').textContent = current ? `正在计算 ${current.channel_name || '渠道'} #${current.channel_id}` : data.status === 'completed' ? '历史计价已更新；失败渠道可核对后再次初始化。' : '先保存最新比例，再一键计算全部已配置渠道。';
+  const list = $('cf-init-results');
+  list.textContent = '';
+  for (const item of data.results || []) {
+    const row = el('div', `init-result ${item.status}`);
+    row.append(el('strong', '', `${item.channel_name || '渠道'} #${item.channel_id}`), el('span', '', `${({ success: '已完成', skipped: '已跳过', failed: '失败' })[item.status] || item.status} · ${item.message}`));
+    list.appendChild(row);
+  }
+  if (data.error) setMessage('cf-backfill-msg', data.error, data.status === 'failed' ? 'bad' : '');
+}
+
+async function pollFinanceInit(version) {
+  if (version !== pageVersion || !$('cf-init-progress')) return;
+  clearTimeout(financeInitPoll);
+  const res = await api('/api/channel-finance/initialize', { timeout: 15000 });
+  if (version !== pageVersion || !$('cf-init-progress')) return;
+  if (res.status === 401) return showLogin();
+  if (!res.ok) {
+    setMessage('cf-backfill-msg', '暂时无法获取进度，后台任务不受影响，正在重新连接…', 'bad');
+    financeInitPoll = setTimeout(() => pollFinanceInit(version), 3000);
+    return;
+  }
+  setMessage('cf-backfill-msg', '');
+  const wasRunning = financeInitRunning;
+  renderFinanceInit(res.data);
+  if (financeInitRunning) financeInitPoll = setTimeout(() => pollFinanceInit(version), 1000);
+  else if (wasRunning) await loadChannelFinance();
 }
 
 async function backfillChannel() {
-  const id = Number($('cf-channel_id').value);
   const version = pageVersion;
-  setMessage('cf-backfill-msg', '正在预览可补算历史…');
-  const preview = await api(`/api/channel-finance/backfill?channel_id=${id}`, { timeout: 30000 });
-  if (version !== pageVersion) return;
-  if (preview.status === 401) return showLogin();
-  if (!preview.ok) return setMessage('cf-backfill-msg', preview.data.error || '预览失败，请重试', 'bad');
-  const data = preview.data;
-  if (data.eligible !== true && !(typeof data.eligible === 'number' && data.eligible > 0)) return setMessage('cf-backfill-msg', data.message || '请先配置两个当前比例，并确认该渠道有过去消耗日志。');
-  if (!Number.isFinite(Number(data.start)) || !Number.isFinite(Number(data.end)) || Number(data.end) <= Number(data.start)) return setMessage('cf-backfill-msg', '预览未返回有效补算区间，无法确认执行', 'bad');
-  const message = `渠道 #${id}：全量覆盖 [${formatTime(data.start)}, ${formatTime(data.end)})，最早日志 ${formatTime(data.earliest_log)}；预览 raw quota ${data.quota}，网站额度 ${data.website_units}；冻结站点比例 1:${data.site_rate}，渠道比例 1:${data.channel_rate}。${data.message || ''} 覆盖区间也适用于以后补入的同区间日志；预览十分钟有效。`;
-  setMessage('cf-backfill-msg', message);
-  if (!confirm(`${message}\n确认执行？`)) return;
-  setMessage('cf-backfill-msg', '正在补算，请勿重复操作…');
-  const result = await api('/api/channel-finance/backfill', { method: 'POST', timeout: 30000, body: { channel_id: id, confirmed: true, preview_token: data.preview_token } });
+  setMessage('cf-backfill-msg', '正在启动初始化任务…');
+  const result = await api('/api/channel-finance/initialize', { method: 'POST', timeout: 15000, body: {} });
   if (version !== pageVersion) return;
   if (result.status === 401) return showLogin();
-  setMessage('cf-backfill-msg', result.ok ? (result.data.message || '全量历史重算覆盖规则已保存，原快照和源日志保留') : (result.data.error || '补算失败或结果未知，请先重新预览核对'), result.ok ? 'ok' : 'bad');
-  if (result.ok) await loadChannelFinance();
+  if (!result.ok) setMessage('cf-backfill-msg', result.data.error || '启动结果未知，正在核对后台状态', 'bad');
+  else {
+    setMessage('cf-backfill-msg', '');
+    renderFinanceInit(result.data);
+    if (result.data.status === 'completed') await loadChannelFinance();
+  }
+  if (result.ok || result.status === 0) await pollFinanceInit(version);
 }
 
 function buildChannelFinance(root) {
   const card = el('div', 'card glass');
   card.appendChild(el('h3', '', '渠道财务配置'));
-  card.appendChild(el('p', 'muted', '渠道比例 1:N 表示 1 元人民币兑换 N 网站额度，渠道折算成本 = 网站额度 / 渠道比例。站点收入独立使用站点比例。新增、修改、删除默认仅向后生效；显式全量重算才覆盖过去。旧单价只保留审计，不参与计算。'));
+  card.appendChild(el('p', 'muted', '渠道比例 1:N 表示 1 元人民币兑换 N 网站额度，渠道折算成本 = 网站额度 / 渠道比例。站点收入独立使用站点比例。新增、修改、删除默认仅向后生效；一键初始化历史财务才覆盖过去。旧单价只保留审计，不参与计算。'));
   const grid = el('div', 'grid');
   for (const [key, label, hint] of [
     ['channel_id', '渠道 ID', '渠道唯一标识（正整数）'], ['channel_name', '渠道名称', '仅用于展示'],
@@ -956,16 +992,46 @@ function buildChannelFinance(root) {
   msg.setAttribute('role', 'status');
   actions.append(save, reset, msg);
   card.appendChild(actions);
+  const initPanel = el('section', 'finance-init-panel');
+  const heading = el('div', 'init-heading');
+  const intro = el('div');
+  intro.append(el('span', 'init-eyebrow', '历史财务 · 批量初始化'), el('h3', '', '保存新比例，一键重新计算'));
+  const percent = el('strong', 'init-percent', '0%');
+  percent.id = 'cf-init-percent';
+  heading.append(intro, percent);
+  initPanel.append(heading, el('p', 'muted', '按当前站点比例和各渠道最新已保存比例，依次覆盖全部过去计价；不需要选择渠道。可重复初始化，不修改源日志。未配置的渠道不参与，处理失败的渠道保留原结果。'));
+  const progress = el('progress', 'init-progress');
+  progress.id = 'cf-init-progress';
+  progress.max = 100;
+  progress.value = 0;
+  progress.setAttribute('aria-label', '历史财务初始化完成进度');
+  const metrics = el('div', 'init-metrics');
+  for (const [id, text] of [['cf-init-state', '准备就绪'], ['cf-init-count', '0 / 0 个渠道'], ['cf-init-summary', '成功 0 · 跳过 0 · 失败 0']]) {
+    const item = el('span', '', text);
+    item.id = id;
+    metrics.appendChild(item);
+  }
+  const current = el('p', 'init-current', '先保存最新比例，再点击下方按钮开始。');
+  current.id = 'cf-init-current';
+  current.setAttribute('role', 'status');
+  const details = el('details', 'init-details');
+  details.appendChild(el('summary', '', '查看逐渠道处理结果'));
+  const results = el('div', 'init-results');
+  results.id = 'cf-init-results';
+  details.appendChild(results);
+  initPanel.append(progress, metrics, current, details);
   const backfillActions = el('div', 'actions');
-  const backfill = el('button', 'btn', '全量重算历史 · 先预览');
+  const backfill = el('button', 'btn primary', '一键初始化历史财务');
   backfill.id = 'cf-backfill';
   backfill.disabled = true;
-  const backfillMessage = el('span', 'muted', '选择任意当前已配置渠道并配置站点比例后可预览。确认后冻结两个当前比例，覆盖该渠道全部过去日志，包括旧快照及删除空档。');
+  const backfillMessage = el('span', 'muted');
   backfillMessage.id = 'cf-backfill-msg';
   backfillMessage.setAttribute('role', 'status');
   backfillActions.append(backfill, backfillMessage);
-  card.appendChild(backfillActions);
+  initPanel.appendChild(backfillActions);
+  card.appendChild(initPanel);
   bindBusyAction('cf-backfill', 'cf-backfill-msg', backfillChannel);
+  pollFinanceInit(pageVersion);
   financeTable(root, '当前渠道财务配置', ['渠道', '货币', '渠道成本比例 1:N', '生效时间', '操作'], 'cf-current');
   const history = el('details', 'finance-details');
   history.appendChild(el('summary', '', '查看渠道配置历史（只读）'));
@@ -1096,7 +1162,7 @@ function buildRates() {
     const res = await api('/api/site-rate', { method: 'POST', body: { rate: $('site-rate').value.trim(), note: $('site-note').value.trim() } });
     if (version !== pageVersion) return;
     if (res.status === 401) return showLogin();
-    setMessage('site-msg', res.ok ? '已保存，仅向后生效；如需历史生效，请显式全量重算各渠道' : res.data.error, res.ok ? 'ok' : 'bad');
+    setMessage('site-msg', res.ok ? '已保存，仅向后生效；如需覆盖历史，请点击一键初始化历史财务' : res.data.error, res.ok ? 'ok' : 'bad');
     if (res.ok) await loadRates();
   });
   ratesBuilt = true;
@@ -1561,7 +1627,7 @@ function buildSettings() {
 
   const consume = el('div', 'card glass');
   consume.appendChild(el('h3', '', '消耗统计通知'));
-  consume.appendChild(el('div', 'muted', '只读 new-api 消耗日志，保留间隔变动 / 阈值通知；独立站点比例计算收入，渠道比例计算成本，均为 CNY。缺比例仍展示网站额度，对应金额未知。历史全量重算需预览与确认，旧单价不再参与利润计算。'));
+  consume.appendChild(el('div', 'muted', '只读 new-api 消耗日志，保留间隔变动 / 阈值通知；独立站点比例计算收入，渠道比例计算成本，均为 CNY。缺比例仍展示网站额度，对应金额未知。保存最新比例后，可一键逐渠道初始化历史财务并查看进度，旧单价不再参与利润计算。'));
   const consumeGrid = el('div', 'grid');
   consumeGrid.id = 'group-consume';
   for (const spec of FIELDS['group-consume']) consumeGrid.appendChild(buildField(spec));

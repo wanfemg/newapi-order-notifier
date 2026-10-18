@@ -22,6 +22,7 @@ import config as config_module
 import consumption as consumption_module
 import finance as finance_module
 import rates as rates_module
+from finance_init import FinanceInitializer
 from notify import send_markdown
 from poller import pay_method_label
 from source import SourceDB
@@ -191,6 +192,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._period = self._range_window()
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
+        if path == "/api/channel-finance/initialize":
+            return self._json(self.server.finance_initializer.status())
         if path == "/api/channel-finance/backfill":
             return self._channel_backfill_preview()
         if path == "/api/config":
@@ -279,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if path == "/api/channel-finance":
             return self._save_channel_finance()
+        if path == "/api/channel-finance/initialize":
+            return self._initialize_channel_finance()
         if path == "/api/channel-finance/backfill":
             return self._save_channel_backfill()
         if path == "/api/channel-finance/delete":
@@ -352,6 +357,17 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "detail": detail})
 
     # ---------- 计价比例 / 渠道成本 / 消耗统计 ----------
+
+    def _initialize_channel_finance(self):
+        if self._read_json() != {}:
+            return self._json({"error": "初始化请求必须是空 JSON 对象 {}"}, 400)
+        try:
+            state = self.server.finance_initializer.start()
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        except Exception as exc:
+            return self._json({"error": f"启动初始化失败：{exc}"}, 500)
+        return self._json(state, 202)
 
     def _channel_finance(self):
         config = config_module.effective_config(self.server.store)
@@ -805,6 +821,7 @@ class Server(ThreadingHTTPServer):
 def build_server(store, poller, reporter, monitor, bind, port):
     server = Server((bind, port), Handler)
     server.store = store
+    server.finance_initializer = FinanceInitializer(store)
     server.poller = poller
     server.reporter = reporter
     server.monitor = monitor
