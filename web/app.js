@@ -38,8 +38,7 @@ const FIELDS = {
     { key: 'lookback_hours', label: '回溯窗口（小时）', hint: '每轮扫描最近 N 小时的订单' },
   ],
   'group-consume': [
-    { key: 'rate_currency', label: '汇总计价货币', hint: '默认 CNY；跨币种金额独立展示，不自动换算' },
-    { key: 'consume_daily_report_enabled', label: '每日消耗财务报表', hint: '按服务端时区每日推送前一天的财务与消费排行' },
+      { key: 'consume_daily_report_enabled', label: '每日消耗财务报表', hint: '按服务端时区每日推送前一天的财务与消费排行' },
     { key: 'consume_daily_report_time', label: '每日财务推送时间', type: 'time', default: '00:00', hint: 'HH:MM，使用服务端时区' },
     { key: 'consume_enabled', label: '开启消耗统计自动通知', hint: '关闭后不按间隔推送消耗通知，仅保留界面查看与手动统计' },
     { key: 'consume_interval', label: '消耗检查间隔（秒）', hint: '默认 600 秒，范围 10 ~ 86400' },
@@ -730,7 +729,7 @@ function renderUserRows(body, count, items, query, currency) {
   }
 }
 
-/* ---------- 汇率配置 ---------- */
+/* ---------- 计价比例 ---------- */
 
 function rateField(id, labelText, placeholder, hint) {
   const field = el('div', 'field');
@@ -768,8 +767,8 @@ function financeTable(root, title, headers, id) {
 }
 
 function currencyAmounts(amounts, value, currency) {
-  const entries = Object.entries(amounts || {});
-  return entries.length ? entries.map(([cur, amount]) => fmtMoney(amount, cur)).join(' / ') : fmtMoney(value, currency);
+  if (value === null || value === undefined) return '未知（不完整）';
+  return fmtMoney(value, currency);
 }
 
 function userConsumptionDetails(user, currency, recharge) {
@@ -792,10 +791,10 @@ function userConsumptionDetails(user, currency, recharge) {
       overview.appendChild(kpi('钱包充值 / 订阅', `${fmtYuan(recharge.wallet)} / ${fmtYuan(recharge.subscription)}`, `平均客单价 ${fmtYuan(recharge.average)}`));
     }
     overview.appendChild(kpi('网站额度 / raw quota', fmtMoney(user.website_units), fmtMoney(user.quota)));
-    overview.appendChild(kpi('折算消费（分币种）', currencyAmounts(user.money_by_currency, user.money, currency), user.income_complete ? '人民币按对应渠道比例计算；其他币种不自动换算' : '金额仅包含已知部分，不等于零'));
+    overview.appendChild(kpi('站点折算收入', currencyAmounts(user.money_by_currency, user.money, currency), user.income_complete ? '网站额度 / 站点比例，CNY；并非实收现金' : '站点比例缺失，收入未知而非零'));
     dialog.appendChild(overview);
     dialog.appendChild(el('p', user.income_complete ? 'ok' : 'bad', `${user.income_complete ? '收入折算完整' : '收入折算不完整或暂无消费数据'}；${(user.warnings || []).join('；') || '各渠道完整性见下表。'}`));
-    const body = financeTable(dialog, '各渠道消费结构', ['渠道', '网站额度', 'raw quota', '折算人民币 / 分币种金额', '成本 / 分币种', '利润', '完整性'], 'user-detail-channels');
+    const body = financeTable(dialog, '各渠道消费结构', ['渠道', '网站额度', 'raw quota', '站点折算收入（CNY）', '渠道折算成本（CNY）', '折算利润', '完整性'], 'user-detail-channels');
     for (const channel of user.channels || []) {
       const row = el('tr');
       for (const value of [
@@ -842,8 +841,6 @@ function renderChannelOptions() {
       $('cf-channel_name').value = name;
       const item = financeItems.find((item) => Number(item.channel_id) === Number(id));
       $('cf-fee_rate').value = item && item.fee_currency === 'CNY' ? item.fee_rate : '';
-      $('cf-cost_currency').value = item ? item.cost_currency : 'CNY';
-      $('cf-cost_per_quota').value = item ? (item.cost_per_quota ?? '') : '';
       updateRatePreview();
       updateBackfillButton();
       root.closest('details').open = false;
@@ -862,7 +859,7 @@ function updateRatePreview() {
   const rate = parsedFeeRate();
   const valid = Number.isFinite(rate) && rate > 0;
   $('cf-fee_rate').setAttribute('aria-invalid', String(Boolean($('cf-fee_rate').value) && !valid));
-  $('cf-preview').textContent = valid ? `换算预览：¥1 = ${fmtMoney(rate)} 网站额度；1 网站额度 = ¥${fmtMoney(1 / rate)}；500000 raw quota = 1 网站额度。` : '填写正数充值比例查看换算，例如 1:7 或 7。';
+  $('cf-preview').textContent = valid ? `换算预览：¥1 = ${fmtMoney(rate)} 网站额度；1 网站额度 = ¥${fmtMoney(1 / rate)}；500000 raw quota = 1 网站额度。` : '填写正数渠道成本比例查看换算，例如 1:7 或 7。';
 }
 
 function updateBackfillButton() {
@@ -880,28 +877,27 @@ async function backfillChannel() {
   if (preview.status === 401) return showLogin();
   if (!preview.ok) return setMessage('cf-backfill-msg', preview.data.error || '预览失败，请重试', 'bad');
   const data = preview.data;
-  if (data.eligible !== true && !(typeof data.eligible === 'number' && data.eligible > 0)) return setMessage('cf-backfill-msg', data.message || '没有可补算的首次配置之前历史；已有配置及删除空档不会处理。');
+  if (data.eligible !== true && !(typeof data.eligible === 'number' && data.eligible > 0)) return setMessage('cf-backfill-msg', data.message || '请先配置两个当前比例，并确认该渠道有过去消耗日志。');
   if (!Number.isFinite(Number(data.start)) || !Number.isFinite(Number(data.end)) || Number(data.end) <= Number(data.start)) return setMessage('cf-backfill-msg', '预览未返回有效补算区间，无法确认执行', 'bad');
-  const message = `渠道 #${id}：可补算 [${formatTime(data.start)}, ${formatTime(data.end)})。仅补首次比例之前未配置历史，不覆盖已有配置或删除空档。${data.message || ''}`;
+  const message = `渠道 #${id}：全量覆盖 [${formatTime(data.start)}, ${formatTime(data.end)})，最早日志 ${formatTime(data.earliest_log)}；预览 raw quota ${data.quota}，网站额度 ${data.website_units}；冻结站点比例 1:${data.site_rate}，渠道比例 1:${data.channel_rate}。${data.message || ''} 覆盖区间也适用于以后补入的同区间日志；预览十分钟有效。`;
   setMessage('cf-backfill-msg', message);
   if (!confirm(`${message}\n确认执行？`)) return;
   setMessage('cf-backfill-msg', '正在补算，请勿重复操作…');
-  const result = await api('/api/channel-finance/backfill', { method: 'POST', body: { channel_id: id, confirmed: true } });
+  const result = await api('/api/channel-finance/backfill', { method: 'POST', body: { channel_id: id, confirmed: true, preview_token: data.preview_token } });
   if (version !== pageVersion) return;
   if (result.status === 401) return showLogin();
-  setMessage('cf-backfill-msg', result.ok ? (result.data.message || '补算完成，仅处理首次配置之前未配置历史') : (result.data.error || '补算失败或结果未知，请先重新预览核对'), result.ok ? 'ok' : 'bad');
+  setMessage('cf-backfill-msg', result.ok ? (result.data.message || '全量历史重算覆盖规则已保存，原快照和源日志保留') : (result.data.error || '补算失败或结果未知，请先重新预览核对'), result.ok ? 'ok' : 'bad');
   if (result.ok) await loadChannelFinance();
 }
 
 function buildChannelFinance(root) {
   const card = el('div', 'card glass');
   card.appendChild(el('h3', '', '渠道财务配置'));
-  card.appendChild(el('p', 'muted', '充值比例为 1:N（1 元人民币兑换 N 网站额度）；成本按底层 raw quota 计价。新增、修改、删除均从保存时起生效，不重算历史。成本留空表示未配置，不等于零成本。'));
+  card.appendChild(el('p', 'muted', '渠道比例 1:N 表示 1 元人民币兑换 N 网站额度，渠道折算成本 = 网站额度 / 渠道比例。站点收入独立使用站点比例。新增、修改、删除默认仅向后生效；显式全量重算才覆盖过去。旧单价只保留审计，不参与计算。'));
   const grid = el('div', 'grid');
   for (const [key, label, hint] of [
     ['channel_id', '渠道 ID', '渠道唯一标识（正整数）'], ['channel_name', '渠道名称', '仅用于展示'],
-    ['fee_currency', '收费货币（固定 CNY）', '新配置只能使用 CNY'], ['fee_rate', '充值比例 1:N', '1:7 表示 1 元人民币兑换 7 网站额度'],
-    ['cost_currency', '成本货币', '如 CNY / USD'], ['cost_per_quota', '每 raw quota 成本（可空）', '留空保存为未配置；0 为零成本'],
+    ['fee_currency', '计价货币（固定 CNY）', '新配置只能使用 CNY'], ['fee_rate', '渠道成本比例 1:N', '1:7 表示 1 元人民币兑换 7 网站额度'],
   ]) grid.appendChild(rateField(`cf-${key}`, label, '', hint));
   $('view-rates').appendChild(card);
   card.appendChild(grid);
@@ -936,13 +932,12 @@ function buildChannelFinance(root) {
   updateRatePreview();
   $('cf-fee_currency').value = 'CNY';
   $('cf-fee_currency').disabled = true;
-  $('cf-cost_currency').value = 'CNY';
   const actions = el('div', 'actions');
   const save = el('button', 'btn primary', '新增 / 保存渠道配置');
   save.id = 'cf-save';
   const reset = el('button', 'btn ghost', '新建 / 清空');
   reset.addEventListener('click', () => {
-    for (const key of ['channel_id', 'channel_name', 'fee_rate', 'cost_per_quota']) $(`cf-${key}`).value = '';
+    for (const key of ['channel_id', 'channel_name', 'fee_rate']) $(`cf-${key}`).value = '';
     updateRatePreview();
     updateBackfillButton();
     setMessage('cf-backfill-msg', '');
@@ -953,33 +948,30 @@ function buildChannelFinance(root) {
   actions.append(save, reset, msg);
   card.appendChild(actions);
   const backfillActions = el('div', 'actions');
-  const backfill = el('button', 'btn', '一键补算未配置历史');
+  const backfill = el('button', 'btn', '全量重算历史 · 先预览');
   backfill.id = 'cf-backfill';
   backfill.disabled = true;
-  const backfillMessage = el('span', 'muted', '选择当前已配置渠道或保存新配置后可预览。仅补首次比例之前未配置历史，不覆盖已有配置或删除空档。');
+  const backfillMessage = el('span', 'muted', '选择任意当前已配置渠道并配置站点比例后可预览。确认后冻结两个当前比例，覆盖该渠道全部过去日志，包括旧快照及删除空档。');
   backfillMessage.id = 'cf-backfill-msg';
   backfillMessage.setAttribute('role', 'status');
   backfillActions.append(backfill, backfillMessage);
   card.appendChild(backfillActions);
   bindBusyAction('cf-backfill', 'cf-backfill-msg', backfillChannel);
-  financeTable(root, '当前渠道财务配置', ['渠道', '收费货币', '充值比例 1:N', '成本货币', '每 raw quota 成本', '生效时间', '操作'], 'cf-current');
+  financeTable(root, '当前渠道财务配置', ['渠道', '货币', '渠道成本比例 1:N', '生效时间', '操作'], 'cf-current');
   const history = el('details', 'finance-details');
   history.appendChild(el('summary', '', '查看渠道配置历史（只读）'));
-  financeTable(history, '历史生效快照', ['生效时间', '渠道', '事件', '收费货币', '充值比例 1:N', '成本货币', '每 raw quota 成本'], 'cf-history');
+  financeTable(history, '历史生效快照', ['生效时间', '渠道', '事件', '历史货币', '渠道成本比例 1:N', '旧成本货币（停用）', '旧 raw quota 单价（停用）'], 'cf-history');
   root.appendChild(history);
   bindBusyAction('cf-save', 'cf-msg', async () => {
     const body = {};
-    for (const key of ['channel_id', 'channel_name', 'fee_currency', 'fee_rate', 'cost_currency', 'cost_per_quota']) body[key] = $(`cf-${key}`).value.trim();
+    for (const key of ['channel_id', 'channel_name', 'fee_currency', 'fee_rate']) body[key] = $(`cf-${key}`).value.trim();
     if (!/^\d+$/.test(body.channel_id) || Number(body.channel_id) <= 0) return setMessage('cf-msg', '请填写正整数渠道 ID', 'bad');
     if (!Number.isSafeInteger(Number(body.channel_id))) return setMessage('cf-msg', '渠道 ID 超出有效范围', 'bad');
     if (!Number.isFinite(parsedFeeRate()) || parsedFeeRate() <= 0) {
       $('cf-fee_rate').focus();
-      return setMessage('cf-msg', '充值比例必须为正数，例如 1:7 或 7', 'bad');
+      return setMessage('cf-msg', '渠道成本比例必须为正数，例如 1:7 或 7', 'bad');
     }
-    if (!body.cost_currency || (body.cost_per_quota !== '' && (!Number.isFinite(Number(body.cost_per_quota)) || Number(body.cost_per_quota) < 0))) return setMessage('cf-msg', '请填写成本货币；成本须留空或填写非负数', 'bad');
-    body.fee_rate = String(parsedFeeRate());
     body.channel_id = Number(body.channel_id);
-    body.cost_per_quota = body.cost_per_quota === '' ? null : body.cost_per_quota;
     await writeChannelFinance('/api/channel-finance', body);
   });
 }
@@ -1011,7 +1003,7 @@ async function loadChannelFinance() {
     empty($('finance-channel-options'), res.data.error || '读取渠道失败');
     for (const id of ['cf-current', 'cf-history']) {
       $(id).textContent = '';
-      tableEmpty($(id), 7, '读取失败，请重新加载');
+      tableEmpty($(id), id === 'cf-current' ? 5 : 7, '读取失败，请重新加载');
     }
     return setMessage('cf-msg', res.data.error || '读取渠道财务配置失败', 'bad');
   }
@@ -1024,14 +1016,14 @@ async function loadChannelFinance() {
   body.textContent = '';
   for (const item of res.data.items || []) {
     const row = el('tr');
-    for (const text of [`${item.channel_name || '渠道'}（#${item.channel_id}）`, item.fee_currency, fmtRate(item.fee_rate), item.cost_currency, fmtMoney(item.cost_per_quota), formatTime(item.updated_at)]) row.appendChild(el('td', '', text));
+    for (const text of [`${item.channel_name || '渠道'}（#${item.channel_id}）`, item.fee_currency, fmtRate(item.fee_rate), formatTime(item.updated_at)]) row.appendChild(el('td', '', text));
     const cell = el('td');
     const edit = el('button', 'btn small', '修改');
     edit.addEventListener('click', () => {
-      for (const key of ['channel_id', 'channel_name', 'cost_currency', 'cost_per_quota']) $(`cf-${key}`).value = item[key] ?? '';
+      for (const key of ['channel_id', 'channel_name']) $(`cf-${key}`).value = item[key] ?? '';
       $('cf-fee_currency').value = 'CNY';
       $('cf-fee_rate').value = item.fee_currency === 'CNY' ? (item.fee_rate ?? '') : '';
-      setMessage('cf-msg', item.fee_currency === 'CNY' ? '已载入配置' : '该历史配置使用非 CNY 收费币种，仅展示；新保存必须重新填写 CNY 充值比例', item.fee_currency === 'CNY' ? 'muted' : 'bad');
+      setMessage('cf-msg', item.fee_currency === 'CNY' ? '已载入配置' : '该历史配置使用非 CNY 计价币种，仅展示；新保存必须重新填写 CNY 渠道成本比例', item.fee_currency === 'CNY' ? 'muted' : 'bad');
       updateRatePreview();
       updateBackfillButton();
       $('cf-channel_id').focus();
@@ -1045,7 +1037,7 @@ async function loadChannelFinance() {
       if (confirm(`删除渠道 #${item.channel_id} 当前配置？历史记录仍保留。`)) await writeChannelFinance('/api/channel-finance/delete', { channel_id: item.channel_id });
     });
   }
-  if (!body.children.length) tableEmpty(body, 7, '暂无渠道配置；未配置渠道不会使用全局汇率折算消费，人民币金额将显示为未知');
+  if (!body.children.length) tableEmpty(body, 5, '暂无渠道配置；未配置渠道比例时成本未知，站点收入由独立站点比例计算');
   const history = $('cf-history');
   history.textContent = '';
   for (const item of res.data.history || []) {
@@ -1054,6 +1046,14 @@ async function loadChannelFinance() {
     history.appendChild(row);
   }
   if (!history.children.length) tableEmpty(history, 7, '暂无历史快照');
+  const overrides = $('cf-overrides');
+  overrides.textContent = '';
+  for (const item of res.data.overrides || []) {
+    const row = el('tr');
+    for (const text of [`#${item.channel_id}`, `[${formatTime(item.start_ts)}, ${formatTime(item.end_ts)})`, fmtRate(item.site_rate), fmtRate(item.channel_rate), formatTime(item.created_at)]) row.appendChild(el('td', '', text));
+    overrides.appendChild(row);
+  }
+  if (!overrides.children.length) tableEmpty(overrides, 5, '暂无全量重算记录');
 }
 
 function tableEmpty(body, columns, text) {
@@ -1067,146 +1067,47 @@ function tableEmpty(body, columns, text) {
 function buildRates() {
   const root = $('view-rates');
   root.textContent = '';
-  const nav = document.querySelector('.nav a[data-view="rates"]');
-  if (nav && nav.lastChild.nodeType === Node.TEXT_NODE) nav.lastChild.textContent = ' 渠道财务';
-  buildChannelFinance(root);
-  const fallback = el('details', 'finance-details');
-  fallback.appendChild(el('summary', '', '全局汇率（独立兼容功能，不参与渠道消费统计）'));
-  root.appendChild(fallback);
-
-  const formCard = el('div', 'card glass');
-  formCard.appendChild(el('h3', '', '全局汇率（独立兼容功能）'));
-  formCard.appendChild(el('p', 'muted', '用于保留旧版汇率 CRUD 与历史记录，不参与渠道消费统计；消费统计只使用日志时间对应的渠道充值比例。'));
-  const grid = el('div', 'grid');
-  grid.appendChild(rateField('rate-currency', '货币种类', '如 CNY / USD', '自定义货币种类，如 CNY、USD、HKD'));
-  grid.appendChild(rateField('rate-value', '汇率规则', '1:7 或 7', '支持「1:X」格式或直接填数字'));
-  grid.appendChild(rateField('rate-note', '备注（可选）', '本次调整原因', '保存后会写入汇率调整历史'));
-  formCard.appendChild(grid);
-  const actions = el('div', 'actions');
-  const saveBtn = el('button', 'btn primary', '保存汇率');
-  saveBtn.id = 'rate-save';
-  actions.appendChild(saveBtn);
-  const msg = el('span', 'muted', '');
-  msg.id = 'rate-msg';
+  const card = el('div', 'card glass');
+  card.appendChild(el('h3', '', '站点比例 · 折算收入'));
+  card.appendChild(el('p', 'muted', '网站额度 = raw quota / 500000；站点收入 = 网站额度 / 站点比例；渠道成本 = 网站额度 / 渠道比例；利润 = 收入 - 成本。均为 CNY，均按 1 元兑换 N 网站额度。日常保存仅向后生效。'));
+  card.appendChild(rateField('site-rate', '站点比例 1:N', '例如 1:7', '独立于渠道成本比例，不自动采用旧全局汇率'));
+  card.appendChild(rateField('site-note', '备注', '', '保存历史以供审计'));
+  const save = el('button', 'btn primary', '保存站点比例');
+  save.id = 'site-save';
+  const msg = el('p', 'muted');
+  msg.id = 'site-msg';
   msg.setAttribute('role', 'status');
-  actions.appendChild(msg);
-  formCard.appendChild(actions);
-  fallback.appendChild(formCard);
-
-  const currentCard = el('div', 'card glass');
-  currentCard.appendChild(el('h3', '', '当前汇率'));
-  const currentWrap = el('div', 'table-wrap');
-  currentWrap.tabIndex = 0;
-  currentWrap.setAttribute('aria-label', '当前汇率表');
-  const currentTable = el('table');
-  const currentHead = el('thead');
-  const currentHeadRow = el('tr');
-  for (const text of ['货币种类', '汇率', '更新时间']) currentHeadRow.appendChild(el('th', '', text));
-  currentHead.appendChild(currentHeadRow);
-  currentTable.appendChild(currentHead);
-  const currentBody = el('tbody');
-  currentBody.id = 'rates-current';
-  currentTable.appendChild(currentBody);
-  currentWrap.appendChild(currentTable);
-  currentCard.appendChild(currentWrap);
-  fallback.appendChild(currentCard);
-
-  const historyCard = el('div', 'card glass');
-  historyCard.appendChild(el('h3', '', '汇率调整历史'));
-  const historyWrap = el('div', 'table-wrap');
-  historyWrap.tabIndex = 0;
-  historyWrap.setAttribute('aria-label', '汇率调整历史表');
-  const historyTable = el('table');
-  const historyHead = el('thead');
-  const historyHeadRow = el('tr');
-  for (const text of ['时间', '货币', '旧汇率', '新汇率', '备注']) historyHeadRow.appendChild(el('th', '', text));
-  historyHead.appendChild(historyHeadRow);
-  historyTable.appendChild(historyHead);
-  const historyBody = el('tbody');
-  historyBody.id = 'rates-history';
-  historyTable.appendChild(historyBody);
-  historyWrap.appendChild(historyTable);
-  historyCard.appendChild(historyWrap);
-  fallback.appendChild(historyCard);
-
-  bindBusyAction('rate-save', 'rate-msg', async () => {
-    const currency = $('rate-currency').value.trim();
-    const rate = $('rate-value').value.trim();
-    const note = $('rate-note').value.trim();
-    if (!currency) return setMessage('rate-msg', '请填写货币种类', 'bad');
-    if (!rate) return setMessage('rate-msg', '请填写汇率规则', 'bad');
+  card.append(save, msg);
+  root.appendChild(card);
+  financeTable(root, '站点比例历史（只读）', ['生效时间', '站点比例 1:N', '备注'], 'site-history');
+  buildChannelFinance(root);
+  financeTable(root, '全量重算审计（最新覆盖优先）', ['渠道', '覆盖区间', '站点比例', '渠道比例', '确认时间'], 'cf-overrides');
+  bindBusyAction('site-save', 'site-msg', async () => {
     const version = pageVersion;
-    setMessage('rate-msg', '保存中…');
-    const res = await api('/api/rates', { method: 'POST', body: { currency, rate, note } });
+    const res = await api('/api/site-rate', { method: 'POST', body: { rate: $('site-rate').value.trim(), note: $('site-note').value.trim() } });
     if (version !== pageVersion) return;
     if (res.status === 401) return showLogin();
-    if (!res.ok) return setMessage('rate-msg', res.data.error || '保存失败', 'bad');
-    if (res.data.changed && !res.data.notified) setMessage('rate-msg', '已保存，但钉钉通知未成功', 'bad');
-    else if (res.data.changed) setMessage('rate-msg', '已保存并推送钉钉通知', 'ok');
-    else setMessage('rate-msg', '已保存（汇率未变化）', 'ok');
-    $('rate-value').value = '';
-    $('rate-note').value = '';
-    await loadRates();
+    setMessage('site-msg', res.ok ? '已保存，仅向后生效；如需历史生效，请显式全量重算各渠道' : res.data.error, res.ok ? 'ok' : 'bad');
+    if (res.ok) await loadRates();
   });
-
   ratesBuilt = true;
 }
 
 async function loadRates() {
   const request = ++fallbackRequest;
   const version = pageVersion;
-  const { ok, status, data } = await api('/api/rates');
+  const res = await api('/api/site-rate');
   if (request !== fallbackRequest || version !== pageVersion) return;
-  if (status === 401) return showLogin();
-  if (!ok) return setMessage('rate-msg', data.error || '读取汇率失败', 'bad');
-  const currencyInput = $('rate-currency');
-  if (currencyInput && !currencyInput.value.trim()) currencyInput.value = data.currency || 'CNY';
-  renderRatesCurrent(data.rates || []);
-  renderRatesHistory(data.history || []);
-}
-
-function renderRatesCurrent(rates) {
-  const body = $('rates-current');
-  if (!body) return;
+  if (res.status === 401) return showLogin();
+  if (!res.ok) return setMessage('site-msg', res.data.error || '读取站点比例失败', 'bad');
+  const body = $('site-history');
   body.textContent = '';
-  if (!rates.length) {
+  for (const item of res.data.history || []) {
     const row = el('tr');
-    const td = el('td', 'muted', '暂无汇率，请在上方配置');
-    td.colSpan = 3;
-    row.appendChild(td);
-    body.appendChild(row);
-    return;
-  }
-  for (const item of rates) {
-    const row = el('tr');
-    row.appendChild(el('td', '', item.currency));
-    row.appendChild(el('td', 'num', fmtRate(item.rate)));
-    row.appendChild(el('td', '', formatTime(item.updated_at)));
+    for (const value of [formatTime(item.effective_at), fmtRate(item.rate), item.note]) row.appendChild(el('td', '', value));
     body.appendChild(row);
   }
-}
-
-function renderRatesHistory(history) {
-  const body = $('rates-history');
-  if (!body) return;
-  body.textContent = '';
-  if (!history.length) {
-    const row = el('tr');
-    const td = el('td', 'muted', '暂无调整记录');
-    td.colSpan = 5;
-    row.appendChild(td);
-    body.appendChild(row);
-    return;
-  }
-  for (const item of history) {
-    const row = el('tr');
-    row.appendChild(el('td', '', formatTime(item.changed_at)));
-    row.appendChild(el('td', '', item.currency));
-    row.appendChild(el('td', 'num', fmtRate(item.old_rate)));
-    row.appendChild(el('td', 'num', fmtRate(item.new_rate)));
-    row.appendChild(el('td', '', item.note || '-'));
-    body.appendChild(row);
-  }
+  if (!body.children.length) tableEmpty(body, 3, '尚未配置站点比例，站点收入未知');
 }
 
 async function renderRates() {
@@ -1232,18 +1133,18 @@ function buildConsumption() {
   const configLink = el('a', 'btn small', '前往渠道财务配置');
   configLink.href = '#/rates';
   root.appendChild(configLink);
-  root.appendChild(el('p', 'muted', '网站额度 = raw quota ÷ 500000；人民币消费按日志时间对应的渠道 1:N 充值比例折算。不同货币分开列示，不自动换算；全局汇率不参与消费统计。'));
-  financeTable(root, '折算消费前五名（后端排序）', ['用户', '网站额度 / raw quota', '折算人民币 / 渠道明细'], 'consumption-top-users');
+  root.appendChild(el('p', 'muted', '网站额度 = raw quota / 500000；站点折算收入 = 网站额度 / 站点比例；渠道折算成本 = 网站额度 / 渠道比例；折算利润 = 收入 - 成本。均为 CNY，两个比例均表示 1 元兑换 N 网站额度；按日志时间或显式重算覆盖规则计价，缺比例时相应金额未知。'));
+  financeTable(root, '站点折算收入前五名（未知排后）', ['用户', '网站额度 / raw quota', '站点折算收入 / 渠道明细'], 'consumption-top-users');
 
   const channelCard = el('div', 'card glass');
-  channelCard.appendChild(el('h3', '', '上游渠道成本明细'));
+  channelCard.appendChild(el('h3', '', '渠道收入、成本与利润'));
   const channelWrap = el('div', 'table-wrap');
   channelWrap.tabIndex = 0;
-  channelWrap.setAttribute('aria-label', '上游渠道成本明细表');
+  channelWrap.setAttribute('aria-label', '渠道收入、成本与利润明细表');
   const channelTable = el('table');
   const channelHead = el('thead');
   const channelHeadRow = el('tr');
-  for (const text of ['渠道', '网站额度 / raw quota', '折算收入（分币种）', '成本（分币种）', '折算消费利润', '配置状态']) channelHeadRow.appendChild(el('th', '', text));
+  for (const text of ['渠道', '网站额度 / raw quota', '站点折算收入（CNY）', '渠道折算成本（CNY）', '折算利润', '配置状态']) channelHeadRow.appendChild(el('th', '', text));
   channelHead.appendChild(channelHeadRow);
   channelTable.appendChild(channelHead);
   const channelBody = el('tbody');
@@ -1310,9 +1211,9 @@ function renderConsumptionKpis(data) {
   kpis.textContent = '';
   const currency = data.currency || 'CNY';
   kpis.appendChild(kpi('网站额度消耗', `${fmtMoney(data.website_units)} · raw quota ${fmtMoney(data.quota)}`, periodLabel()));
-  kpis.appendChild(kpi('用户消耗金额', fmtMoney(data.user_money, currency), '汇总货币已知收入；其他币种见渠道明细', true));
-  kpis.appendChild(kpi('上游渠道成本', fmtMoney(data.upstream_cost, currency), '汇总货币已知成本，不含缺失部分'));
-  kpis.appendChild(kpi('折算消费利润', fmtMoney(data.profit, currency), data.complete ? '折算收入减去成本' : '配置缺失或跨币种，无法准确计算'));
+  kpis.appendChild(kpi('站点折算收入', fmtMoney(data.user_money, currency), '网站额度 / 站点比例；缺比例时未知', true));
+  kpis.appendChild(kpi('渠道折算成本', fmtMoney(data.upstream_cost, currency), '网站额度 / 渠道比例；缺比例时未知'));
+  kpis.appendChild(kpi('折算利润', fmtMoney(data.profit, currency), data.complete ? '站点折算收入 - 渠道折算成本' : '比例缺失，无法准确计算'));
 }
 
 function renderConsumptionChannels(channels, currency) {
@@ -1380,7 +1281,7 @@ function buildReports() {
   root.appendChild(link);
   const consume = el('div', 'card glass report-grid');
   consume.appendChild(el('h3', '', '每日消耗财务报表'));
-  consume.appendChild(el('p', 'muted', '使用服务端时区，推送前一天网站额度、raw quota、折算人民币消费、成本、折算消费利润及消费前五名；不影响原有充值日报 / 周报。'));
+  consume.appendChild(el('p', 'muted', '使用服务端时区，推送前一天网站额度、raw quota、站点折算收入、渠道折算成本、折算利润及按站点收入排序的前五名；不影响原有实收充值日报 / 周报。'));
   const consumeState = el('p', 'muted');
   consumeState.id = 'consume-daily-state';
   consume.appendChild(consumeState);
@@ -1651,7 +1552,7 @@ function buildSettings() {
 
   const consume = el('div', 'card glass');
   consume.appendChild(el('h3', '', '消耗统计通知'));
-  consume.appendChild(el('div', 'muted', '只读 new-api 消耗日志，保留间隔变动 / 阈值通知；收费与成本统一在「渠道财务」配置，未配置渠道仍展示网站额度，但人民币折算为未知。全局汇率不参与消费统计。'));
+  consume.appendChild(el('div', 'muted', '只读 new-api 消耗日志，保留间隔变动 / 阈值通知；独立站点比例计算收入，渠道比例计算成本，均为 CNY。缺比例仍展示网站额度，对应金额未知。历史全量重算需预览与确认，旧单价不再参与利润计算。'));
   const consumeGrid = el('div', 'grid');
   consumeGrid.id = 'group-consume';
   for (const spec of FIELDS['group-consume']) consumeGrid.appendChild(buildField(spec));

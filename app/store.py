@@ -84,6 +84,29 @@ CREATE TABLE IF NOT EXISTS channel_finance_backfill (
     end_ts INTEGER NOT NULL,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS site_rate_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rate TEXT NOT NULL,
+    effective_at INTEGER NOT NULL,
+    note TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS finance_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL,
+    channel_snapshot_id INTEGER NOT NULL,
+    site_snapshot_id INTEGER NOT NULL,
+    channel_rate TEXT NOT NULL,
+    site_rate TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    end_ts INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    preview_token TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS finance_previews (
+    token TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS daily_report_runs (
     day TEXT PRIMARY KEY,
     status TEXT NOT NULL,
@@ -422,6 +445,78 @@ class Store:
         return bool(self._read(
             "SELECT 1 FROM channel_finance_history WHERE channel_id = ? "
             "AND effective_at <= ? LIMIT 1", (int(channel_id), int(ts))))
+
+    def save_site_rate(self, rate, note="", effective_at=None):
+        from rates import parse_rate
+        rate = str(parse_rate(rate))
+        effective = int(time.time()) if effective_at is None else int(effective_at)
+        with self._lock, self._conn:
+            current = self.find_site_rate()
+            if effective < 0 or (current and effective < current["effective_at"]):
+                raise ValueError("生效时间不能早于已有历史")
+            cursor = self._conn.execute(
+                "INSERT INTO site_rate_history (rate, effective_at, note) VALUES (?, ?, ?)",
+                (rate, effective, str(note or "")))
+            return cursor.lastrowid
+
+    def find_site_rate(self, ts=None):
+        rows = self._read(
+            "SELECT * FROM site_rate_history WHERE effective_at <= ? "
+            "ORDER BY effective_at DESC, id DESC LIMIT 1",
+            (int(time.time()) if ts is None else int(ts),))
+        return dict(rows[0]) if rows else None
+
+    def site_rate_history(self):
+        return [dict(row) for row in self._read(
+            "SELECT * FROM site_rate_history ORDER BY effective_at DESC, id DESC")]
+
+    def current_channel_snapshot(self, channel_id):
+        rows = self._read(
+            "SELECT * FROM channel_finance_history WHERE channel_id = ? "
+            "ORDER BY effective_at DESC, id DESC LIMIT 1", (int(channel_id),))
+        return dict(rows[0]) if rows and not rows[0]["deleted"] else None
+
+    def finance_override(self, channel_id, ts):
+        rows = self._read(
+            "SELECT * FROM finance_overrides WHERE channel_id = ? AND start_ts <= ? "
+            "AND end_ts > ? ORDER BY id DESC LIMIT 1", (int(channel_id), int(ts), int(ts)))
+        return dict(rows[0]) if rows else None
+
+    def finance_overrides(self, channel_id=None):
+        where = " WHERE channel_id = ?" if channel_id is not None else ""
+        return [dict(row) for row in self._read(
+            "SELECT * FROM finance_overrides" + where + " ORDER BY id DESC",
+            (int(channel_id),) if channel_id is not None else ())]
+
+    def save_finance_preview(self, payload):
+        import secrets
+        token = secrets.token_urlsafe(32)
+        self._write("INSERT INTO finance_previews VALUES (?, ?, ?)",
+                    (token, json.dumps(payload), int(time.time())))
+        return token
+
+    def confirm_finance_preview(self, token, channel_id):
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            rows = self._conn.execute(
+                "SELECT * FROM finance_previews WHERE token = ?", (str(token),)).fetchall()
+            if not rows or int(time.time()) - rows[0]["created_at"] > 600:
+                raise ValueError("预览不存在或已过期，请重新预览")
+            payload = json.loads(rows[0]["payload"])
+            channel = self.current_channel_snapshot(channel_id)
+            site = self.find_site_rate()
+            if (payload["channel_id"] != channel_id or not channel or not site
+                    or payload["channel_snapshot_id"] != channel["id"]
+                    or payload["site_snapshot_id"] != site["id"]):
+                raise ValueError("比例已变化，请重新预览")
+            self._conn.execute(
+                "INSERT INTO finance_overrides (channel_id, channel_snapshot_id, "
+                "site_snapshot_id, channel_rate, site_rate, start_ts, end_ts, created_at, "
+                "preview_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (channel_id, channel["id"], site["id"], payload["channel_rate"],
+                 payload["site_rate"], payload["start"], payload["end"], int(time.time()), token))
+            self._conn.execute("DELETE FROM finance_previews WHERE token = ?", (token,))
+            return payload
 
     def claim_daily_report(self, day):
         cursor = self._write(

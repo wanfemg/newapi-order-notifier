@@ -1,8 +1,7 @@
-"""站点充值汇率：1:X 输入、货币种类、历史记录，全程用 Decimal 保证精度。
+"""站点收入与渠道成本比例解析，全程使用 Decimal。
 
-全局汇率仅保留兼容 CRUD 与历史记录，不参与渠道消费统计。渠道充值比例 1:N 表示 1 元人民币
-兑换 N 个网站额度；网站额度由 raw quota ÷ 500000 得到。汇率与历史都以字符串（Decimal）形式存本程序自己的库，
-不写入 new-api。
+两种比例 1:N 都表示 1 元人民币兑换 N 个网站额度；网站额度由 raw quota ÷ 500000 得到。
+比例及历史仅存本后台，不写入 new-api。旧全局汇率函数仅用于内部历史兼容，无公开编辑接口。
 """
 
 from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
@@ -92,13 +91,10 @@ def save_channel_finance(store, body):
     fee_currency = normalize_currency(body.get("fee_currency", "CNY"))
     if fee_currency != "CNY":
         raise ValueError("渠道收费货币必须为 CNY")
-    cost_currency = normalize_currency(body.get("cost_currency", fee_currency))
     fee_rate = parse_rate(body.get("fee_rate"))
-    cost = body.get("cost_per_quota")
-    cost = None if cost is None or cost == "" else parse_cost(cost)
     return store.upsert_channel_finance(
         int(cid), str(body.get("channel_name") or "").strip(), fee_currency,
-        fee_rate, cost_currency, cost)
+        fee_rate, "CNY", None)
 
 
 def render_rate_change(currency, old_rate, new_rate, note=""):

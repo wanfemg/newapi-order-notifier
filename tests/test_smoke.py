@@ -960,11 +960,11 @@ def main():
     check(cstats["quota"] == 200, "总消耗额度 200")
     check(cstats["website_units"] == "0.0004" and cstats["user_money"] is None,
           "200 raw quota = 0.0004 网站额度；仅有全局汇率时人民币未知")
-    check(cstats["upstream_cost"] == "1.2", "上游成本 80*0.01 + 20*0.02 = 1.2")
+    check(cstats["upstream_cost"] is None, "旧 raw quota 单价不参与渠道成本")
     check([(c["channel_id"], c["quota"], c["cost"], c["cost_currency"])
            for c in cstats["channels"]] ==
-          [(3, 100, None, "CNY"), (1, 80, "0.8", "CNY"), (2, 20, "0.4", "CNY")],
-          "渠道按额度降序且成本口径正确，缺成本不是零成本")
+          [(3, 100, None, "CNY"), (1, 80, None, "CNY"), (2, 20, None, "CNY")],
+          "渠道按额度降序，未配置渠道比例的成本未知")
     ch3 = next(channel for channel in cstats["channels"] if channel["channel_id"] == 3)
     check(ch3["profit"] is None and ch3["complete"] is False
           and ch3["cost_configured"] is False
@@ -1009,7 +1009,7 @@ def main():
     check(len(messages) == 3, "三轮消耗推送了 3 条消息")
     check(any("累计底层 quota**：100" in item["markdown"]["text"]
               and "累计网站额度**：0.0002" in item["markdown"]["text"]
-              and "折算人民币消费" in item["markdown"]["text"] for item in messages),
+              and "站点折算收入" in item["markdown"]["text"] for item in messages),
           "阈值消息同时展示累计 raw quota、网站额度和人民币折算")
 
     print("\n32) 消耗 HTTP 接口：汇率保存、渠道成本与消耗统计")
@@ -1042,39 +1042,28 @@ def main():
         cookie5 = resp.headers["Set-Cookie"].split(";")[0]
 
     status_code, payload = call(get5("/api/rates"))
-    check(status_code == 200 and payload["rates"] == [] and payload["history"] == [],
-          "初始汇率列表与历史均为空")
-    with patch.object(store_module.time, "time", return_value=rate_saved_at - 1):
-        status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7"}))
-    check(status_code == 200 and payload["ok"] and not payload["changed"]
-          and not payload["notified"], "首次保存汇率不触发通知")
+    check(status_code == 404, "旧全局汇率 API 已移除")
+    status_code, payload = call(get5("/api/site-rate"))
+    check(status_code == 200 and payload["history"] == [], "初始站点比例历史为空")
     with patch.object(store_module.time, "time", return_value=rate_saved_at):
-        status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "7.5"}))
+        status_code, payload = call(post5("/api/site-rate", {"rate": "7.5"}))
+        check(status_code == 200, "保存独立站点比例")
+        status_code, payload = call(post5("/api/channel-finance", {
+            "channel_id": 1, "channel_name": "测试渠道", "fee_currency": "CNY", "fee_rate": "15"}))
+    check(status_code == 200, "保存渠道成本比例")
     add_consume_log(consume_http_db, 1, 1, 1, 900, rate_saved_at + 1)
-    check(status_code == 200 and payload["changed"] and payload["notified"],
-          "调整汇率触发通知")
-    status_code, payload = call(post5("/api/rates", {"currency": "CNY", "rate": "0"}))
-    check(status_code == 400, "非法汇率返回 400")
-
+    status_code, payload = call(post5("/api/site-rate", {"rate": "0"}))
+    check(status_code == 400, "非法站点比例返回 400")
     status_code, payload = call(get5("/api/channels"))
     check(status_code == 200 and len(payload["channels"]) == 3, "渠道列表返回 3 条")
-    status_code, payload = call(post5("/api/cost", {"channel_id": 1, "cost_per_unit": "0.01"}))
-    check(status_code == 200 and payload.get("ok"), "保存渠道成本单价")
-    status_code, payload = call(get5("/api/channels"))
-    ch1 = [c for c in payload["channels"] if c["id"] == 1][0]
-    check(ch1["cost_per_unit"] == "0.01" and ch1["cost_currency"] == "CNY",
-          "渠道成本回显为保存值")
-    status_code, payload = call(post5("/api/cost/delete", {"channel_id": 1}))
-    check(status_code == 200 and payload.get("ok"), "删除渠道成本单价")
-    status_code, payload = call(get5("/api/channels"))
-    ch1 = [c for c in payload["channels"] if c["id"] == 1][0]
-    check(ch1["cost_per_unit"] == "", "删除后成本单价为空")
-
+    for path in ("/api/cost", "/api/cost/delete"):
+        status_code, payload = call(post5(path, {"channel_id": 1}))
+        check(status_code == 404, "旧成本编辑 API 已移除：" + path)
     status_code, payload = call(get5("/api/consumption?days=1"))
-    check(status_code == 200 and payload["rate"] == "0" and payload["quota"] == 900
-          and payload["website_units"] == "0.0018" and payload["user_money"] is None
-          and payload["upstream_cost"] is None and payload["has_rate"] is False,
-          "消费接口保留网站额度；只有全局汇率而无渠道比例时人民币未知")
+    check(status_code == 200 and payload["quota"] == 900
+          and payload["website_units"] == "0.0018" and payload["user_money"] == "0.00024"
+          and payload["upstream_cost"] == "0.00012" and payload["profit"] == "0.00012",
+          "消费接口按站点比例计算收入、按渠道比例计算成本和利润")
     httpd5.shutdown()
 
     failed = [label for ok, label in CHECKS if not ok]

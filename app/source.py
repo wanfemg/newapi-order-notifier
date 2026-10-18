@@ -296,7 +296,7 @@ class SourceDB:
         return {int(row["id"]): (row.get("title") or "") for row in rows}
 
     def channels(self):
-        """只读渠道列表（id/name/type/models/status），供渠道成本单价配置用。"""
+        """只读渠道列表（id/name/type/models/status），供渠道成本比例配置用。"""
         conn = self._connect()
         try:
             cursor = conn.cursor()

@@ -128,25 +128,30 @@ class FinanceAPITest(unittest.TestCase):
             self.assertEqual(self.call(path, {"channel_id": 1, "confirmed": value})[0], 400)
         self.assertEqual(self.call(path + "?channel_id=1&channel_id=2")[0], 400)
         self.assertFalse(self.call(path + "?channel_id=1")[1]["eligible"])
-        self.store.upsert_channel_finance(1, "channel", "CNY", "7", "CNY", "0", self.now + 10)
-        preview = self.call(path + "?channel_id=1")[1]
+        self.store.upsert_channel_finance(1, "channel", "CNY", "14", "CNY", "0", self.now - 1)
+        self.store.save_site_rate("7", effective_at=self.now - 1)
+        with patch.object(webui.time, "time", return_value=self.now + 10):
+            preview = self.call(path + "?channel_id=1")[1]
         self.assertIs(preview["eligible"], True)
-        self.assertEqual((preview["start"], preview["end"]), (self.now, self.now + 10))
+        self.assertEqual((preview["start"], preview["end"]), (0, self.now + 10))
+        self.assertEqual((preview["site_rate"], preview["channel_rate"]), ("7", "14"))
         before = self.store.list_channel_finance_history()
-        for _ in range(2):
-            status, result, _ = self.call(path, {"channel_id": 1, "confirmed": True})
-            self.assertEqual(status, 200)
-            self.assertEqual(set(result), {"message"})
-        self.assertFalse(self.call(path + "?channel_id=1")[1]["eligible"])
+        body = {"channel_id": 1, "confirmed": True, "preview_token": preview["preview_token"]}
+        self.assertEqual(self.call(path, body)[0], 200)
+        self.assertEqual(self.call(path, body)[0], 400)
+        self.assertTrue(self.call(path + "?channel_id=1")[1]["eligible"])
         self.assertEqual(self.store.list_channel_finance_history(), before)
-        self.assertTrue(self.call(f"/api/consumption?start={self.now}&end={self.now + 1}")[1]["has_rate"])
+        self.assertEqual(len(self.call("/api/channel-finance")[1]["overrides"]), 1)
+        result = self.call(f"/api/consumption?start={self.now}&end={self.now + 1}")[1]
+        self.assertEqual((result["money"], result["cost"], result["profit"]),
+                         ("0.00002", "0.00001", "0.00001"))
 
     def test_authentication_and_csrf(self):
-        for path in ("/api/channel-finance", "/api/channel-finance/history",
+        for path in ("/api/site-rate", "/api/channel-finance", "/api/channel-finance/history",
                      "/api/finance/users", "/api/reports", "/api/consumption"):
             with self.subTest(path=path):
                 self.assertEqual(self.call(path, auth=False)[0], 401)
-        for path in ("/api/channel-finance", "/api/channel-finance/delete", "/api/config"):
+        for path in ("/api/site-rate", "/api/channel-finance", "/api/channel-finance/delete", "/api/config"):
             with self.subTest(path=path):
                 self.assertEqual(self.call(path, {}, auth=False)[0], 401)
                 self.assertEqual(self.call(path, {}, csrf=False)[0], 403)
@@ -191,9 +196,8 @@ class FinanceAPITest(unittest.TestCase):
                 self.assertEqual(self.save(channel_id=value)[0], 400)
                 self.assertEqual(self.call("/api/channel-finance/delete", {"channel_id": value})[0], 400)
         for fields in ({"fee_rate": "0"}, {"fee_rate": "NaN"}, {"fee_rate": "1:Infinity"},
-                       {"cost_per_quota": "-1"}, {"cost_per_quota": "Infinity"},
                        {"fee_currency": ""}, {"fee_currency": "USD"},
-                       {"fee_currency": "eur"}, {"cost_currency": "x" * 17}):
+                       {"fee_currency": "eur"}):
             with self.subTest(fields=fields):
                 self.assertEqual(self.save(**fields)[0], 400)
         for path in ("/api/channel-finance", "/api/channel-finance/delete"):
@@ -251,6 +255,7 @@ class FinanceAPITest(unittest.TestCase):
         self.assertIn("weekly_last", payload)
 
     def test_users_preserve_recharge_and_include_consumption_only_user(self):
+        self.store.save_site_rate("7", effective_at=self.now - 1)
         self.store.upsert_channel_finance(1, "测试渠道", "CNY", "7", "CNY", "0.01",
                                           effective_at=self.now - 1)
         status, payload, _ = self.call("/api/finance/users")
@@ -266,7 +271,7 @@ class FinanceAPITest(unittest.TestCase):
         self.assertEqual(user["website_units"], "0.00014")
         self.assertEqual(user["channels"][0]["website_units"], "0.00014")
         self.assertEqual(user["channels"][0]["channel_id"], 1)
-        self.assertEqual(user["profit"], "-0.69998")
+        self.assertEqual(user["profit"], "0")
         self.assertEqual(self.call("/api/finance/users?days=1")[1]["days"], 1)
 
     def test_missing_logs_does_not_break_recharge(self):
@@ -289,13 +294,20 @@ class FinanceAPITest(unittest.TestCase):
             status, payload, _ = self.call("/api/consumption")
         self.assertEqual(status, 200)
         self.assertEqual(payload, expected)
-        for bad in ("NaN", "Infinity", "-1", "abc", None):
-            with self.subTest(bad=bad):
-                self.assertEqual(self.call("/api/cost", {"channel_id": 1, "cost_per_unit": bad})[0], 400)
-        self.assertEqual(self.call("/api/cost", {
-            "channel_id": 1, "cost_per_unit": "1", "cost_currency": "x" * 17})[0], 400)
+        for path in ("/api/cost", "/api/cost/delete", "/api/rates"):
+            self.assertEqual(self.call(path, {"channel_id": 1})[0], 404)
+        self.assertEqual(self.call("/api/rates")[0], 404)
         self.assertEqual(self.store.channel_costs(), [])
-        self.assertEqual(self.call("/api/cost", {"channel_id": 1, "cost_per_unit": "0"})[0], 200)
+
+    def test_site_rate_history_and_validation(self):
+        self.assertEqual(self.call("/api/site-rate")[0], 200)
+        for value in ("0", "NaN", "Infinity", "-1", None):
+            self.assertEqual(self.call("/api/site-rate", {"rate": value})[0], 400)
+        self.assertEqual(self.call("/api/site-rate", {"rate": "1:7"})[0], 200)
+        self.assertEqual(self.call("/api/site-rate", {"rate": "1:14"})[0], 200)
+        self.assertEqual([r["rate"] for r in self.store.site_rate_history()], ["14", "7"])
+        self.assertEqual(self.save(cost_per_quota="NaN", cost_currency="invalid")[0], 200)
+        self.assertIsNone(self.store.list_channel_finance()[0]["cost_per_quota"])
 
 
 if __name__ == "__main__":

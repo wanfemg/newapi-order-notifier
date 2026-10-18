@@ -58,6 +58,7 @@ class DailyFinanceTests(unittest.TestCase):
         })
         self.store.upsert_channel_finance(1, "测试渠道", "CNY", "2", "CNY", "0.1",
                                          effective_at=1)
+        self.store.save_site_rate("1", effective_at=1)
         self.monitor = consume_monitor.ConsumptionMonitor(self.store)
         self.now = local_ts(2026, 10, 18, 9)
 
@@ -96,8 +97,8 @@ class DailyFinanceTests(unittest.TestCase):
                          (local_ts(2026, 10, 17), local_ts(2026, 10, 18)))
         text = send.call_args.args[2]
         for expected in ("2026-10-17", "网站额度消耗**：0.00012", "底层 quota**：60",
-                         "折算人民币消费**：0.00006 CNY", "全站成本**：6 CNY",
-                         "折算消费利润**：-5.99994 CNY", "不代表实收现金",
+                         "站点折算收入**：0.00012 CNY", "渠道折算成本**：0.00006 CNY",
+                         "折算利润**：0.00006 CNY", "不代表实收现金",
                          "测试渠道", "alice", "用户消费前五名"):
             self.assertIn(expected, text)
         self.assertEqual(self.store.daily_report_runs()[0]["status"], "success")
