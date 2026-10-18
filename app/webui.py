@@ -385,14 +385,13 @@ class Handler(BaseHTTPRequestHandler):
         site_rate = str(rates_module.parse_rate(site["rate"]))
         end = int(time.time())
         source = SourceDB(config_module.effective_config(store))
-        rows = [row for row in source.consumption(0, end)
-                if int(row.get("channel_id") or 0) == channel_id and int(row.get("quota") or 0) > 0]
-        if not rows:
+        summary = source.channel_consumption_summary(channel_id, end)
+        if summary["first_at"] is None:
             result["message"] = "该渠道没有可重算的过去消耗日志"
             return result, snapshot
-        quota = sum(int(row["quota"]) for row in rows)
+        quota = int(summary["quota"])
         result.update(eligible=True, channel_id=channel_id, start=0, end=end,
-                      earliest_log=min(int(row["created_at"]) for row in rows),
+                      earliest_log=int(summary["first_at"]),
                       quota=quota, website_units=rates_module.fmt_money(
                           rates_module.Decimal(quota) / consumption_module.QUOTA_PER_UNIT),
                       channel_snapshot_id=snapshot["id"], site_snapshot_id=site["id"],

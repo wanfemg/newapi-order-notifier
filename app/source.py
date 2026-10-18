@@ -321,6 +321,16 @@ class SourceDB:
             (2, int(channel_id), int(end_ts)))
         return rows[0]["first_at"]
 
+    def channel_consumption_summary(self, channel_id, end_ts):
+        """只读汇总指定渠道的历史消耗，避免拉取全站逐秒明细。"""
+        p = self.placeholder
+        rows = self._fetch(
+            f"SELECT MIN(created_at) AS first_at, SUM(quota) AS quota "
+            f"FROM logs WHERE type = {p} AND channel_id = {p} "
+            f"AND quota > 0 AND created_at >= {p} AND created_at < {p}",
+            (2, int(channel_id), 0, int(end_ts)))
+        return rows[0]
+
     def consumption(self, start_ts, end_ts):
         """窗口内消耗日志按 (user_id, channel_id, created_at) 汇总 quota 与条数。
 

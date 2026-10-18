@@ -13,7 +13,7 @@ DATA_DIR = os.environ.get("DATA_DIR", "./data")
 UI_PORT = int(os.environ.get("UI_PORT", "8080"))
 UI_BIND = os.environ.get("UI_BIND", "0.0.0.0")
 # 由 deploy.sh 写入 .env，便于在界面确认当前跑的是哪个版本
-VERSION = os.environ.get("APP_VERSION", "").strip() or "1.1.4-max"
+VERSION = os.environ.get("APP_VERSION", "").strip() or "1.1.5-max"
 
 DEFAULTS = {
     # 钉钉自定义机器人

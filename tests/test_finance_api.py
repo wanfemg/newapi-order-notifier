@@ -139,12 +139,39 @@ class FinanceAPITest(unittest.TestCase):
         body = {"channel_id": 1, "confirmed": True, "preview_token": preview["preview_token"]}
         self.assertEqual(self.call(path, body)[0], 200)
         self.assertEqual(self.call(path, body)[0], 400)
-        self.assertTrue(self.call(path + "?channel_id=1")[1]["eligible"])
+        with patch.object(webui.time, "time", return_value=self.now + 10):
+            self.assertTrue(self.call(path + "?channel_id=1")[1]["eligible"])
         self.assertEqual(self.store.list_channel_finance_history(), before)
         self.assertEqual(len(self.call("/api/channel-finance")[1]["overrides"]), 1)
         result = self.call(f"/api/consumption?start={self.now}&end={self.now + 1}")[1]
         self.assertEqual((result["money"], result["cost"], result["profit"]),
                          ("0.00002", "0.00001", "0.00001"))
+
+    def test_backfill_preview_aggregates_only_selected_channel(self):
+        self.store.upsert_channel_finance(1, "channel", "CNY", "14", "CNY", "0", self.now - 1)
+        self.store.save_site_rate("7", effective_at=self.now - 1)
+        with closing(sqlite3.connect(self.source_path)) as conn, conn:
+            conn.executemany(
+                "INSERT INTO logs (user_id, channel_id, type, quota, created_at) VALUES (?, ?, ?, ?, ?)",
+                [(2, 1, 2, 30, 0), (2, 1, 2, 50, self.now - 20),
+                 (2, 2, 2, 9000, self.now - 30), (2, 1, 1, 9000, self.now - 30),
+                 (2, 1, 2, -100, self.now - 30), (2, 1, 2, 0, self.now - 30),
+                 (2, 1, 2, 9000, self.now + 10), (2, 1, 2, 9000, -1)])
+        with patch.object(source.SourceDB, "consumption", side_effect=AssertionError("不得读取全站明细")), \
+                patch.object(webui.time, "time", return_value=self.now + 10):
+            status, preview, _ = self.call("/api/channel-finance/backfill?channel_id=1")
+        self.assertEqual(status, 200)
+        self.assertIs(preview["eligible"], True)
+        self.assertEqual(preview["quota"], 150)
+        self.assertEqual(preview["earliest_log"], 0)
+        self.assertEqual(preview["website_units"], "0.0003")
+        self.store.upsert_channel_finance(3, "empty", "CNY", "14", "CNY", "0", self.now - 1)
+        status, preview, _ = self.call("/api/channel-finance/backfill?channel_id=3")
+        self.assertEqual(status, 200)
+        self.assertIs(preview["eligible"], False)
+        with patch.object(source.SourceDB, "channel_consumption_summary", side_effect=RuntimeError("查询失败")):
+            self.assertEqual(self.call("/api/channel-finance/backfill?channel_id=1")[0], 500)
+        self.assertTrue(self.call("/api/channel-finance/backfill?channel_id=1")[1]["eligible"])
 
     def test_authentication_and_csrf(self):
         for path in ("/api/site-rate", "/api/channel-finance", "/api/channel-finance/history",

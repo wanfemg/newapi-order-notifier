@@ -138,8 +138,10 @@ function fmtRate(rate) {
 
 /* ---------- 请求 ---------- */
 
-async function api(path, { method = 'GET', body } = {}) {
-  const options = { method, headers: {}, credentials: 'same-origin' };
+async function api(path, { method = 'GET', body, timeout = 0 } = {}) {
+  const controller = new AbortController();
+  const timer = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null;
+  const options = { method, headers: {}, credentials: 'same-origin', signal: controller.signal };
   if (method !== 'GET') {
     options.headers['Content-Type'] = 'application/json';
     options.headers[CSRF_HEADER] = CSRF_VALUE;
@@ -158,7 +160,9 @@ async function api(path, { method = 'GET', body } = {}) {
     }
     return { ok: response.ok && data.ok !== false, status: response.status, data };
   } catch {
-    return { ok: false, status: 0, data: { error: '网络连接失败，请检查连接后重试；发送结果可能未知，请先核对钉钉消息' } };
+    return { ok: false, status: 0, data: { error: controller.signal.aborted ? '请求超时，已停止等待；预览可重试，保存或重算请先刷新核对结果再操作' : '网络连接失败，请检查连接后重试；发送结果可能未知，请先核对钉钉消息' } };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -863,16 +867,21 @@ function updateRatePreview() {
 }
 
 function updateBackfillButton() {
-  if (!$('cf-backfill')) return;
+  const button = $('cf-backfill');
+  if (!button) return;
   const id = Number($('cf-channel_id').value);
-  $('cf-backfill').disabled = !financeLoaded || !financeItems.some((item) => Number(item.channel_id) === id);
+  const configured = financeItems.some((item) => Number(item.channel_id) === id);
+  const busy = button.getAttribute('aria-busy') === 'true';
+  button.disabled = busy || !financeLoaded || !configured;
+  button.title = busy ? '正在处理，请稍候' : !financeLoaded ? '请先成功加载渠道配置' : !configured ? '请先选择已保存比例的渠道，或点击下方配置的“修改”载入渠道' : '预览并确认该渠道的全部历史重算';
+  if (!busy) button.textContent = configured && financeLoaded ? `全量重算渠道 #${id} · 先预览` : '全量重算历史 · 请先选择已配置渠道';
 }
 
 async function backfillChannel() {
   const id = Number($('cf-channel_id').value);
   const version = pageVersion;
   setMessage('cf-backfill-msg', '正在预览可补算历史…');
-  const preview = await api(`/api/channel-finance/backfill?channel_id=${id}`);
+  const preview = await api(`/api/channel-finance/backfill?channel_id=${id}`, { timeout: 30000 });
   if (version !== pageVersion) return;
   if (preview.status === 401) return showLogin();
   if (!preview.ok) return setMessage('cf-backfill-msg', preview.data.error || '预览失败，请重试', 'bad');
@@ -883,7 +892,7 @@ async function backfillChannel() {
   setMessage('cf-backfill-msg', message);
   if (!confirm(`${message}\n确认执行？`)) return;
   setMessage('cf-backfill-msg', '正在补算，请勿重复操作…');
-  const result = await api('/api/channel-finance/backfill', { method: 'POST', body: { channel_id: id, confirmed: true, preview_token: data.preview_token } });
+  const result = await api('/api/channel-finance/backfill', { method: 'POST', timeout: 30000, body: { channel_id: id, confirmed: true, preview_token: data.preview_token } });
   if (version !== pageVersion) return;
   if (result.status === 401) return showLogin();
   setMessage('cf-backfill-msg', result.ok ? (result.data.message || '全量历史重算覆盖规则已保存，原快照和源日志保留') : (result.data.error || '补算失败或结果未知，请先重新预览核对'), result.ok ? 'ok' : 'bad');
@@ -995,7 +1004,7 @@ async function loadChannelFinance() {
   updateBackfillButton();
   $('cf-count').textContent = '正在加载全部渠道…';
   empty($('finance-channel-options'), '加载中…');
-  const res = await api('/api/channel-finance');
+  const res = await api('/api/channel-finance', { timeout: 30000 });
   if (request !== ratesRequest || version !== pageVersion) return;
   if (res.status === 401) return showLogin();
   if (!res.ok) {
@@ -1771,6 +1780,7 @@ function bindBusyAction(id, messageId, action) {
     } finally {
       button.disabled = false;
       button.removeAttribute('aria-busy');
+      if (id === 'cf-backfill' && button.isConnected) updateBackfillButton();
     }
   });
 }
