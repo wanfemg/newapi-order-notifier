@@ -35,15 +35,12 @@ def totals(rows):
     return {"money": money, "orders": len(rows), "users": users}
 
 
-def trend(rows, days, start=None, end=None):
+def trend(rows, days):
     """按天汇总金额与笔数，缺失的天补 0。返回 {days, points:[{date,money,orders}]}。"""
     buckets = {}
-    if start is None or end is None:
-        start, end = range_window(days)
-    first = date.fromisoformat(_day(start))
-    count = (date.fromisoformat(_day(end - 1)) - first).days + 1
-    for offset in range(count):
-        day = first + timedelta(days=offset)
+    start, _ = range_window(days)
+    for offset in range(days):
+        day = date.fromisoformat(_day(start)) + timedelta(days=offset)
         buckets[day.isoformat()] = {"money": 0.0, "orders": 0}
     for row in rows:
         key = _day(row.get("create_time") or 0)

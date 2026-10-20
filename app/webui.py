@@ -19,10 +19,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config as config_module
-import consumption as consumption_module
 import finance as finance_module
-import rates as rates_module
-from finance_init import FinanceInitializer
 from notify import send_markdown
 from poller import pay_method_label
 from source import SourceDB
@@ -185,17 +182,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"authed": self._cookie_authed()})
         if not self._require_auth():
             return
-        if path in ("/api/finance/summary", "/api/finance/trend", "/api/finance/ranking",
-                    "/api/finance/users", "/api/orders", "/api/orders/export.csv",
-                    "/api/consumption"):
-            try:
-                self._period = self._range_window()
-            except ValueError as exc:
-                return self._json({"error": str(exc)}, 400)
-        if path == "/api/channel-finance/initialize":
-            return self._json(self.server.finance_initializer.status())
-        if path == "/api/channel-finance/backfill":
-            return self._channel_backfill_preview()
         if path == "/api/config":
             current = config_module.effective_config(self.server.store)
             return self._json({
@@ -224,25 +210,11 @@ class Handler(BaseHTTPRequestHandler):
                 "weekly_report": config["weekly_report"],
                 "daily_last": self.server.store.get_state("daily_report_last"),
                 "weekly_last": self.server.store.get_state("weekly_report_last"),
-                "consume_daily_report_enabled": config["consume_daily_report_enabled"],
-                "consume_daily_report_time": config["consume_daily_report_time"],
-                "consume_daily_runs": self.server.store.daily_report_runs(),
             })
         if path == "/api/orders":
             return self._orders()
         if path == "/api/orders/export.csv":
             return self._orders_export()
-        if path == "/api/site-rate":
-            return self._json({"current": self.server.store.find_site_rate(),
-                               "history": self.server.store.site_rate_history()})
-        if path == "/api/channel-finance":
-            return self._channel_finance()
-        if path == "/api/channel-finance/history":
-            return self._channel_finance_history()
-        if path == "/api/channels":
-            return self._channels()
-        if path == "/api/consumption":
-            return self._consumption()
         return self._json({"error": "接口不存在"}, 404)
 
     def do_POST(self):
@@ -271,23 +243,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/history/clear":
             self.server.store.clear_history()
             return self._json({"ok": True})
-        if path == "/api/site-rate":
-            body = self._read_json()
-            try:
-                if not isinstance(body, dict):
-                    raise ValueError("站点比例必须是对象")
-                self.server.store.save_site_rate(body.get("rate"), body.get("note", ""))
-            except ValueError as exc:
-                return self._json({"error": str(exc)}, 400)
-            return self._json({"ok": True})
-        if path == "/api/channel-finance":
-            return self._save_channel_finance()
-        if path == "/api/channel-finance/initialize":
-            return self._initialize_channel_finance()
-        if path == "/api/channel-finance/backfill":
-            return self._save_channel_backfill()
-        if path == "/api/channel-finance/delete":
-            return self._delete_channel_finance()
         return self._json({"error": "接口不存在"}, 404)
 
     # ---------- 业务 ----------
@@ -309,9 +264,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True}, cookie=token)
 
     def _save_config(self):
-        body = self._read_json()
-        if not isinstance(body, dict):
-            return self._json({"error": "配置必须是 JSON 对象"}, 400)
+        body = self._read_json() or {}
         incoming = body.get("config") if isinstance(body.get("config"), dict) else body
         values = {}
         for key, value in incoming.items():
@@ -355,154 +308,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._json({"ok": False, "detail": str(exc)}, 400)
         return self._json({"ok": True, "detail": detail})
-
-    # ---------- 计价比例 / 渠道成本 / 消耗统计 ----------
-
-    def _initialize_channel_finance(self):
-        if self._read_json() != {}:
-            return self._json({"error": "初始化请求必须是空 JSON 对象 {}"}, 400)
-        try:
-            state = self.server.finance_initializer.start()
-        except ValueError as exc:
-            return self._json({"error": str(exc)}, 400)
-        except Exception as exc:
-            return self._json({"error": f"启动初始化失败：{exc}"}, 500)
-        return self._json(state, 202)
-
-    def _channel_finance(self):
-        config = config_module.effective_config(self.server.store)
-        try:
-            channels = SourceDB(config).channels()
-        except Exception as exc:
-            return self._json({"error": f"读取渠道失败：{exc}"}, 500)
-        return self._json({
-            "items": self.server.store.list_channel_finance(),
-            "history": self.server.store.list_channel_finance_history(),
-            "overrides": self.server.store.finance_overrides(),
-            "channels": channels,
-        })
-
-    @staticmethod
-    def _channel_id(value):
-        text = str(value)
-        if isinstance(value, bool) or not text.isascii() or not text.isdigit() or int(text) <= 0:
-            raise ValueError("channel_id 必须是正整数")
-        return int(text)
-
-    def _backfill_preview(self, channel_id):
-        store = self.server.store
-        result = {"eligible": False, "start": 0, "end": 0,
-                  "message": "请先配置当前站点比例和该渠道 CNY 比例"}
-        snapshot = store.current_channel_snapshot(channel_id)
-        site = store.find_site_rate()
-        if not snapshot or snapshot["fee_currency"] != "CNY" or not site:
-            return result, None
-        channel_rate = str(rates_module.parse_rate(snapshot["fee_rate"]))
-        site_rate = str(rates_module.parse_rate(site["rate"]))
-        end = int(time.time())
-        source = SourceDB(config_module.effective_config(store))
-        summary = source.channel_consumption_summary(channel_id, end)
-        if summary["first_at"] is None:
-            result["message"] = "该渠道没有可重算的过去消耗日志"
-            return result, snapshot
-        quota = int(summary["quota"])
-        result.update(eligible=True, channel_id=channel_id, start=0, end=end,
-                      earliest_log=int(summary["first_at"]),
-                      quota=quota, website_units=rates_module.fmt_money(
-                          rates_module.Decimal(quota) / consumption_module.QUOTA_PER_UNIT),
-                      channel_snapshot_id=snapshot["id"], site_snapshot_id=site["id"],
-                      channel_rate=channel_rate, site_rate=site_rate,
-                      message="冻结当前两个比例覆盖该渠道全部过去日志，包含旧快照和删除空档；原快照及源日志不修改，未来仍按历史计价。")
-        result["preview_token"] = store.save_finance_preview(result)
-        return result, snapshot
-
-    def _channel_backfill_preview(self):
-        try:
-            query = urllib.parse.parse_qs(
-                urllib.parse.urlparse(self.path).query, keep_blank_values=True)
-            ids = query.get("channel_id", [])
-            if len(ids) != 1:
-                raise ValueError("channel_id 必须是单个正整数")
-            channel_id = self._channel_id(ids[0])
-            result, _ = self._backfill_preview(channel_id)
-        except ValueError as exc:
-            return self._json({"error": str(exc)}, 400)
-        except Exception as exc:
-            return self._json({"error": f"预览历史补算失败：{exc}"}, 500)
-        return self._json(result)
-
-    def _save_channel_backfill(self):
-        try:
-            body = self._read_json()
-            if not isinstance(body, dict) or body.get("confirmed") is not True:
-                raise ValueError("历史补算必须明确 confirmed: true")
-            channel_id = self._channel_id(body.get("channel_id"))
-            self.server.store.confirm_finance_preview(body.get("preview_token"), channel_id)
-        except ValueError as exc:
-            return self._json({"error": str(exc)}, 400)
-        except Exception as exc:
-            return self._json({"error": f"历史补算失败：{exc}"}, 500)
-        return self._json({"message": "全量历史重算规则已保存，查询和推送立即使用；原快照及源日志保留"})
-
-    def _channel_finance_history(self):
-        query = urllib.parse.parse_qs(
-            urllib.parse.urlparse(self.path).query, keep_blank_values=True)
-        channel_id = None
-        if "channel_id" in query:
-            try:
-                if len(query["channel_id"]) != 1:
-                    raise ValueError("channel_id 必须是单个正整数")
-                channel_id = self._channel_id(query["channel_id"][0])
-            except ValueError as exc:
-                return self._json({"error": str(exc)}, 400)
-        return self._json({
-            "items": self.server.store.list_channel_finance_history(channel_id),
-            "overrides": self.server.store.finance_overrides(channel_id),
-        })
-
-    def _save_channel_finance(self):
-        body = self._read_json()
-        try:
-            item = rates_module.save_channel_finance(self.server.store, body)
-        except ValueError as exc:
-            return self._json({"error": str(exc)}, 400)
-        return self._json({"ok": True, "item": item})
-
-    def _delete_channel_finance(self):
-        body = self._read_json()
-        try:
-            if not isinstance(body, dict):
-                raise ValueError("渠道配置必须是对象")
-            channel_id = self._channel_id(body.get("channel_id"))
-            self.server.store.delete_channel_finance(channel_id)
-        except ValueError as exc:
-            return self._json({"error": str(exc)}, 400)
-        return self._json({"ok": True, "channel_id": channel_id})
-
-    def _channels(self):
-        config = config_module.effective_config(self.server.store)
-        try:
-            channels = SourceDB(config).channels()
-        except Exception as exc:
-            return self._json({"error": f"读取渠道失败：{exc}"}, 500)
-        costs = {int(row["channel_id"]): row for row in self.server.store.channel_costs()}
-        for channel in channels:
-            cost = costs.get(int(channel["id"]))
-            channel["cost_per_unit"] = cost["cost_per_unit"] if cost else ""
-            channel["cost_currency"] = cost["currency"] if cost else "CNY"
-        return self._json({"channels": channels})
-
-    def _consumption(self):
-        days = self._qint("days", 7, 1, 365)
-        config = config_module.effective_config(self.server.store)
-        start, end = self._period
-        try:
-            stats = consumption_module.compute(
-                self.server.store, SourceDB(config), int(start), int(end),
-                config["rate_currency"])
-        except Exception as exc:
-            return self._json({"error": f"读取消耗数据失败：{exc}"}, 500)
-        return self._json(stats)
 
     def _status(self):
         status = dict(self.server.poller.status)
@@ -561,25 +366,9 @@ class Handler(BaseHTTPRequestHandler):
             return default
         return max(minimum, min(maximum, value))
 
-    def _range_window(self):
-        query = urllib.parse.parse_qs(
-            urllib.parse.urlparse(self.path).query, keep_blank_values=True)
-        if "start" not in query and "end" not in query:
-            return finance_module.range_window(self._qint("days", 7, 1, 365))
-        values = []
-        for key in ("start", "end"):
-            parts = query.get(key, [])
-            if (len(parts) != 1 or not parts[0].isascii() or not parts[0].isdigit()
-                    or not 0 < int(parts[0]) <= 253402300799):
-                raise ValueError("start/end 必须成对提供单个正整数 Unix 秒")
-            values.append(int(parts[0]))
-        if values[1] <= values[0]:
-            raise ValueError("end 必须大于 start")
-        return tuple(values)
-
     def _finance_success(self, days):
         """窗口内的成功订单行，供概览/趋势/排行复用。"""
-        start, end = self._period
+        start, end = finance_module.range_window(days)
         source = SourceDB(config_module.effective_config(self.server.store))
         return source.success_orders(int(start), int(end))
 
@@ -603,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
         days = self._qint("days", 7, 1, 365)
         try:
             rows = self._finance_success(days)
-            return self._json(finance_module.trend(rows, days, *self._period))
+            return self._json(finance_module.trend(rows, days))
         except Exception as exc:
             return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
 
@@ -626,26 +415,11 @@ class Handler(BaseHTTPRequestHandler):
                 [row["user_id"] for row in rows])
         except Exception as exc:
             return self._json({"error": f"读取财务数据失败：{exc}"}, 500)
-        config = config_module.effective_config(self.server.store)
-        payload = {
-            "days": days, "items": finance_module.users(rows, names),
-            "consumption_users": [], "currency": config["rate_currency"],
-            "consumption_error": "",
-        }
-        start, end = self._period
-        try:
-            stats = consumption_module.compute(
-                self.server.store, SourceDB(config), int(start), int(end),
-                config["rate_currency"])
-            payload["consumption_users"] = stats["users"]
-            payload["currency"] = stats["currency"]
-        except Exception as exc:
-            payload["consumption_error"] = f"读取消耗数据失败：{exc}"
-        return self._json(payload)
+        return self._json({"days": days, "items": finance_module.users(rows, names)})
 
     def _flow_rows(self, days, limit, buckets):
         """窗口内的流水订单，超时未支付的 pending 按 expire_minutes 推导为超时。"""
-        start, end = self._period
+        start, end = finance_module.range_window(days)
         config = config_module.effective_config(self.server.store)
         expire_minutes = int(config["expire_minutes"] or 0)
         expire_before = int(time.time()) - expire_minutes * 60 if expire_minutes > 0 else None
@@ -818,17 +592,15 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def build_server(store, poller, reporter, monitor, bind, port):
+def build_server(store, poller, reporter, bind, port):
     server = Server((bind, port), Handler)
     server.store = store
-    server.finance_initializer = FinanceInitializer(store)
     server.poller = poller
     server.reporter = reporter
-    server.monitor = monitor
     server.sessions = Sessions()
     server.limiter = LoginLimiter()
     return server
 
 
-def serve(store, poller, reporter, monitor, bind, port):
-    build_server(store, poller, reporter, monitor, bind, port).serve_forever()
+def serve(store, poller, reporter, bind, port):
+    build_server(store, poller, reporter, bind, port).serve_forever()

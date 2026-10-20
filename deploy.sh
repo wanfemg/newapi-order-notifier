@@ -41,7 +41,7 @@ cd "$PROJECT_DIR"
 log_info "项目目录：$PROJECT_DIR"
 
 # 版本号用于在部署横幅和界面里确认“到底升没升上去”
-VERSION="1.1.6-max"
+VERSION="1.1.0"
 log_info "当前版本：$VERSION"
 
 # ---------- 1. 环境检查 ----------

@@ -13,7 +13,7 @@ DATA_DIR = os.environ.get("DATA_DIR", "./data")
 UI_PORT = int(os.environ.get("UI_PORT", "8080"))
 UI_BIND = os.environ.get("UI_BIND", "0.0.0.0")
 # 由 deploy.sh 写入 .env，便于在界面确认当前跑的是哪个版本
-VERSION = os.environ.get("APP_VERSION", "").strip() or "1.1.6-max"
+VERSION = os.environ.get("APP_VERSION", "").strip() or "1.1.0"
 
 DEFAULTS = {
     # 钉钉自定义机器人
@@ -43,14 +43,6 @@ DEFAULTS = {
     # 每天 00:00 推送前一天的充值统计与排行榜
     "daily_report": True,
     "weekly_report": True,
-    # 站点充值汇率与消耗统计（只读 new-api，成本单价与汇率存本程序自己的库）
-    "rate_currency": "CNY",   # 用户消耗金额的计价货币（1 rate_currency = X 额度）
-    "consume_daily_report_enabled": False,
-    "consume_daily_report_time": "09:00",
-    "consume_enabled": False,  # 是否开启消耗统计自动通知
-    "consume_interval": 600,   # 消耗统计检查间隔（秒）
-    "consume_threshold_quota": 0,  # 累计额度达到该值触发阈值通知，0 表示关闭
-    "consume_change_quota": 0,     # 单次新增额度达到该值触发变动通知，0 表示关闭
 }
 
 # 敏感项：界面只回显占位文案，提交该文案或空值时保持已保存的值
@@ -62,14 +54,12 @@ ENV_KEYS = ("db_type", "db_dsn", "sqlite_path", "poll_interval")
 BOOL_KEYS = {
     "enabled", "push_success", "push_failed",
     "push_expired", "scope_wallet", "scope_subscription", "backfill", "daily_report",
-    "weekly_report", "consume_enabled", "consume_daily_report_enabled",
+    "weekly_report",
 }
-INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes", "consume_interval",
-            "consume_threshold_quota", "consume_change_quota"}
+INT_KEYS = {"poll_interval", "lookback_hours", "expire_minutes"}
 FLOAT_KEYS = {"large_order_threshold", "min_push_amount"}
 STR_KEYS = {"dingtalk_webhook", "dingtalk_secret", "dingtalk_keyword",
-            "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path", "rate_currency",
-            "consume_daily_report_time"}
+            "dingtalk_at_mobiles", "db_type", "db_dsn", "sqlite_path"}
 
 DB_TYPES = ("postgres", "mysql", "sqlite")
 
@@ -198,8 +188,6 @@ def coerce(key, value):
             number = int(str(value).strip())
         except (TypeError, ValueError):
             raise ValueError(f"{key} 需要是整数") from None
-        if key in ("consume_threshold_quota", "consume_change_quota") and number < 0:
-            raise ValueError(f"{key} 需要是非负整数")
         return number
     if key in FLOAT_KEYS:
         try:
@@ -209,10 +197,6 @@ def coerce(key, value):
         if not math.isfinite(number) or number < 0:
             raise ValueError(f"{key} 需要是非负有限金额")
         return number
-    if key == "consume_daily_report_time":
-        if not isinstance(value, str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value):
-            raise ValueError(f"{key} 需要是 HH:MM 格式的有效时间（00:00 ~ 23:59）")
-        return value
     if key in STR_KEYS:
         return str(value).strip()
     return value
@@ -236,12 +220,7 @@ def validate(config):
         errors.append("回溯窗口不能小于 1 小时")
     if not 0 <= config["expire_minutes"] <= 10080:
         errors.append("超时判定分钟数需要在 0 ~ 10080 之间（0 表示关闭推导）")
-    if not config["rate_currency"]:
-        errors.append("汇率基准货币不能为空")
-    if not 10 <= config["consume_interval"] <= 86400:
-        errors.append("消耗统计检查间隔需要在 10 ~ 86400 秒之间")
-    for key in (*FLOAT_KEYS, "consume_daily_report_time",
-                "consume_threshold_quota", "consume_change_quota"):
+    for key in FLOAT_KEYS:
         try:
             coerce(key, config[key])
         except ValueError as exc:

@@ -37,14 +37,6 @@ const FIELDS = {
     { key: 'backfill', label: '首次运行补推历史订单', hint: '默认关闭：首次只登记存量；补推的历史订单会标注「补发推送」' },
     { key: 'lookback_hours', label: '回溯窗口（小时）', hint: '每轮扫描最近 N 小时的订单' },
   ],
-  'group-consume': [
-      { key: 'consume_daily_report_enabled', label: '每日消耗财务报表', hint: '按服务端时区每日推送前一天的财务与消费排行' },
-    { key: 'consume_daily_report_time', label: '每日财务推送时间', type: 'time', default: '00:00', hint: 'HH:MM，使用服务端时区' },
-    { key: 'consume_enabled', label: '开启消耗统计自动通知', hint: '关闭后不按间隔推送消耗通知，仅保留界面查看与手动统计' },
-    { key: 'consume_interval', label: '消耗检查间隔（秒）', hint: '默认 600 秒，范围 10 ~ 86400' },
-    { key: 'consume_change_quota', label: '变动通知阈值（raw quota）', hint: '单次间隔内新增底层 quota 达到该值触发「消耗变动」通知；0 表示关闭' },
-    { key: 'consume_threshold_quota', label: '累计阈值（raw quota）', hint: '累计底层 quota 达到该值触发「达到阈值」通知并清零；0 表示关闭' },
-  ],
 };
 
 const SECRET_KEYS = new Set(['db_dsn', 'dingtalk_webhook', 'dingtalk_secret']);
@@ -55,10 +47,8 @@ const BUCKET_TEXT = { success: '成功', failed: '失败' };
 const BOOL_KEYS = new Set([
   'enabled', 'push_success', 'push_failed',
   'push_expired', 'scope_wallet', 'scope_subscription', 'backfill', 'daily_report', 'weekly_report',
-  'consume_enabled', 'consume_daily_report_enabled',
 ]);
-const INT_KEYS = new Set(['poll_interval', 'lookback_hours', 'expire_minutes',
-  'consume_interval', 'consume_threshold_quota', 'consume_change_quota']);
+const INT_KEYS = new Set(['poll_interval', 'lookback_hours', 'expire_minutes']);
 const DECIMAL_KEYS = new Set(['large_order_threshold', 'min_push_amount']);
 
 const $ = (id) => document.getElementById(id);
@@ -78,11 +68,6 @@ let historyRequest = 0;
 let reportsRequest = 0;
 let reportsBuilt = false;
 let userSearch = '';
-let ratesBuilt = false;
-let ratesRequest = 0;
-let consumptionBuilt = false;
-let consumptionRequest = 0;
-let fallbackRequest = 0;
 
 /* ---------- 工具 ---------- */
 
@@ -91,6 +76,83 @@ function el(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+// All icon paths are local constants; dynamic API text is never parsed as markup.
+const ICONS = {
+  layers: ['M12 3 3 8l9 5 9-5-9-5Z', 'm3 12 9 5 9-5', 'm3 16 9 5 9-5'],
+  overview: ['M3 3h7v7H3z', 'M14 3h7v7h-7z', 'M3 14h7v7H3z', 'M14 14h7v7h-7z'],
+  orders: ['M6 3h12v18l-3-2-3 2-3-2-3 2V3Z', 'M9 7h6', 'M9 11h6', 'M9 15h3'],
+  ranking: ['M8 3h8v5a4 4 0 0 1-8 0V3Z', 'M8 5H4v2a4 4 0 0 0 4 4', 'M16 5h4v2a4 4 0 0 1-4 4', 'M12 12v6', 'M8 21h8l-1-3H9l-1 3Z'],
+  users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', 'M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z', 'M17 4a4 4 0 0 1 0 7', 'M22 21v-2a4 4 0 0 0-3-3.87'],
+  reports: ['M14 2H5v20h14V7l-5-5Z', 'M14 2v5h5', 'M8 17v-3', 'M12 17v-6', 'M16 17v-4'],
+  settings: ['M4 6h16', 'M4 12h16', 'M4 18h16', 'M8 3v6', 'M16 9v6', 'M10 15v6'],
+  calendar: ['M4 5h16v16H4z', 'M8 3v4', 'M16 3v4', 'M4 10h16', 'M8 14h2', 'M14 14h2'],
+  logout: ['M9 4H4v16h5', 'M10 12h11', 'm17 8 4 4-4 4'],
+  sun: ['M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z', 'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5'],
+  moon: ['M20.5 14.5A9 9 0 0 1 9.5 3.5a9 9 0 1 0 11 11Z'],
+  trend: ['M3 19h18', 'M4 14 9 9l4 4 7-9', 'M15 4h5v5'],
+  wallet: ['M3 6h17v15H3z', 'M3 6V4h14v2', 'M16 11h5v5h-5z'],
+  payment: ['M3 5h18v14H3z', 'M3 10h18', 'M7 15h3'],
+  download: ['M12 3v12', 'm7 10 5 5 5-5', 'M4 16v5h16v-5'],
+  refresh: ['M20 7v5h-5', 'M4 17v-5h5', 'M6 7a7 7 0 0 1 12-2l2 3', 'M18 17a7 7 0 0 1-12 2l-2-3'],
+  send: ['m3 3 18 9-18 9 4-9-4-9Z', 'M7 12h14'],
+  database: ['M4 6a8 3 0 1 0 16 0 8 3 0 1 0-16 0Z', 'M4 6v6a8 3 0 0 0 16 0V6', 'M4 12v6a8 3 0 0 0 16 0v-6'],
+  shield: ['m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z', 'm8 12 3 3 5-6'],
+  info: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Z', 'M12 11v6', 'M12 7h.01'],
+  empty: ['M4 7h16v14H4z', 'M8 7V3h8v4', 'M9 14h6'],
+};
+const PAGE_META = {
+  overview: ['收支概览', 'FINANCIAL OVERVIEW', '从收入趋势到订单构成，掌握每一笔成功交易。'],
+  orders: ['订单流水', 'TRANSACTION LEDGER', '追溯交易明细，筛选订单结果，导出清晰可核对的流水。'],
+  ranking: ['充值排行', 'CONTRIBUTION RANKING', '以成功充值金额为序，看见所选周期内的主要贡献者。'],
+  users: ['用户画像', 'CUSTOMER INSIGHTS', '聚合周期内的充值行为，让每一位用户的交易有迹可循。'],
+  reports: ['报表与推送', 'REPORTS & DELIVERY', '每日与每周的收入汇总，以及每一次通知的发送记录。'],
+  settings: ['工作台设置', 'WORKSPACE SETTINGS', '连接数据源，配置通知规则，按你的节奏管理财务推送。'],
+};
+
+function icon(name) {
+  const svg = svgEl('svg', { viewBox: '0 0 24 24', class: 'icon-svg', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.65, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false' });
+  for (const d of ICONS[name] || ICONS.layers) svg.appendChild(svgEl('path', { d }));
+  return svg;
+}
+
+function sectionHeading(title, subtitle, name, number) {
+  const head = el('div', 'section-heading');
+  const mark = el('span', 'section-icon');
+  mark.appendChild(icon(name));
+  const copy = el('div');
+  copy.appendChild(el('h3', '', title));
+  if (subtitle) copy.appendChild(el('p', '', subtitle));
+  head.append(mark, copy);
+  if (number) head.appendChild(el('span', 'section-number', number));
+  return head;
+}
+
+function infoStrip(text) {
+  const strip = el('div', 'info-strip');
+  strip.append(icon('info'), el('p', '', text));
+  return strip;
+}
+
+function addButtonIcon(button, name) {
+  button.prepend(icon(name));
+  return button;
+}
+
+function amountMeter(value, max) {
+  const width = Math.max(0, Math.min(100, (Number(value) || 0) / Math.max(1, max) * 100));
+  const svg = svgEl('svg', { viewBox: '0 0 100 6', preserveAspectRatio: 'none', class: 'meter', 'aria-hidden': 'true' });
+  svg.append(svgEl('rect', { width: 100, height: 6, rx: 3, class: 'meter-track' }), svgEl('rect', { width: width.toFixed(2), height: 6, rx: 3, class: 'meter-fill' }));
+  return svg;
+}
+
+function updateDirtyIndicator() {
+  const dirty = Object.values(inputs).some((input) => input.dataset.dirty === 'true');
+  const bar = $('settings-savebar');
+  if (bar) bar.classList.toggle('has-dirty', dirty);
+  const label = $('save-state');
+  if (label) label.textContent = dirty ? '有未保存的更改' : '配置管理';
 }
 
 function cssVar(name) {
@@ -119,29 +181,19 @@ function formatTime(seconds) {
 
 function empty(root, text) {
   root.textContent = '';
-  root.appendChild(el('div', 'empty', text || '暂无数据'));
-}
-
-function fmtMoney(value, currency) {
-  if (value === null || value === undefined || value === '') return '—（未完整计算）';
-  let n = Number(value);
-  if (!Number.isFinite(n)) return '—（无效金额）';
-  const text = n.toLocaleString('zh-CN', { maximumFractionDigits: 6 });
-  return currency ? `${text} ${currency}` : text;
-}
-
-function fmtRate(rate) {
-  const n = Number(rate);
-  if (!Number.isFinite(n) || n <= 0) return '-';
-  return '1:' + fmtMoney(rate);
+  const message = text || '暂无数据';
+  const loading = /加载中|读取.*中/.test(message);
+  const state = el('div', loading ? 'empty is-loading' : 'empty');
+  state.setAttribute('role', 'status');
+  if (!loading) state.appendChild(icon('empty'));
+  state.appendChild(el('span', '', message));
+  root.appendChild(state);
 }
 
 /* ---------- 请求 ---------- */
 
-async function api(path, { method = 'GET', body, timeout = 0 } = {}) {
-  const controller = new AbortController();
-  const timer = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null;
-  const options = { method, headers: {}, credentials: 'same-origin', signal: controller.signal };
+async function api(path, { method = 'GET', body } = {}) {
+  const options = { method, headers: {}, credentials: 'same-origin' };
   if (method !== 'GET') {
     options.headers['Content-Type'] = 'application/json';
     options.headers[CSRF_HEADER] = CSRF_VALUE;
@@ -160,9 +212,7 @@ async function api(path, { method = 'GET', body, timeout = 0 } = {}) {
     }
     return { ok: response.ok && data.ok !== false, status: response.status, data };
   } catch {
-    return { ok: false, status: 0, data: { error: controller.signal.aborted ? '请求超时，已停止等待；预览可重试，保存或重算请先刷新核对结果再操作' : '网络连接失败，请检查连接后重试；发送结果可能未知，请先核对钉钉消息' } };
-  } finally {
-    clearTimeout(timer);
+    return { ok: false, status: 0, data: { error: '网络连接失败，请检查连接后重试；发送结果可能未知，请先核对钉钉消息' } };
   }
 }
 
@@ -182,8 +232,11 @@ function applyTheme(theme) {
   try { localStorage.setItem('theme', theme); } catch { /* 存储不可用时仍允许切换主题 */ }
   const toggle = $('theme-toggle');
   if (toggle) {
-    toggle.textContent = theme === 'dark' ? '浅色' : '深色';
-    toggle.setAttribute('aria-label', `切换为${toggle.textContent}主题`);
+    const label = theme === 'dark' ? '浅色' : '深色';
+    toggle.textContent = '';
+    toggle.append(icon(theme === 'dark' ? 'sun' : 'moon'), el('span', '', label));
+    toggle.setAttribute('aria-label', `切换为${label}主题`);
+    toggle.title = `切换为${label}主题`;
   }
 }
 
@@ -197,7 +250,6 @@ function initTheme() {
 /* ---------- 界面切换 ---------- */
 
 function showLogin() {
-  for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
   pageVersion++;
   configRequest++;
   statusRequest++;
@@ -219,85 +271,61 @@ function showApp() {
 
 const RANGES = [['1', '今天'], ['7', '近 7 天'], ['30', '近 30 天'], ['90', '近 90 天']];
 
-let appliedPeriod = null;
-
-function localMinute(date) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function periodQuery(extra = {}) {
-  return new URLSearchParams({ days: String(currentRange), start: String(appliedPeriod.start), end: String(appliedPeriod.end), ...extra });
-}
-
-function periodLabel() {
-  return `[${formatTime(appliedPeriod.start)}, ${formatTime(appliedPeriod.end)})`;
-}
-
-function applyPeriod(start, end, custom = false) {
-  appliedPeriod = { start, end };
-  $('period-start').value = localMinute(new Date(start * 1000));
-  $('period-end').value = localMinute(new Date(end * 1000));
-  $('period-label').textContent = `当前查询区间：${periodLabel()}`;
-  setMessage('period-error', '');
-  $('period-end').setCustomValidity('');
-  for (const button of $('range').querySelectorAll('button')) {
-    const active = !custom && Number(button.dataset.days) === currentRange;
-    button.classList.toggle('on', active);
-    button.setAttribute('aria-pressed', String(active));
-  }
-}
-
-function quickPeriod() {
-  const end = new Date();
-  end.setSeconds(0, 0);
-  const start = new Date(end);
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - currentRange + 1);
-  applyPeriod(Math.floor(start.getTime() / 1000), Math.floor(end.getTime() / 1000));
-}
-
 function buildRange() {
   const wrap = $('range');
   wrap.textContent = '';
   for (const [days, label] of RANGES) {
     const btn = el('button', Number(days) === currentRange ? 'on' : '', label);
-    btn.dataset.days = days;
+    btn.setAttribute('aria-pressed', String(Number(days) === currentRange));
     btn.addEventListener('click', () => {
       currentRange = Number(days);
-      quickPeriod();
-      if (!['settings', 'reports', 'rates'].includes(currentRoute())) renderCurrent();
+      $('range-caption').textContent = label;
+      for (const b of wrap.querySelectorAll('button')) {
+        const selected = b === btn;
+        b.classList.toggle('on', selected);
+        b.setAttribute('aria-pressed', String(selected));
+      }
+      if (!['settings', 'reports'].includes(currentRoute())) renderCurrent();
     });
     wrap.appendChild(btn);
   }
-  if (!appliedPeriod) quickPeriod();
-  $('period-zone').textContent = `浏览器时区：${Intl.DateTimeFormat().resolvedOptions().timeZone}；精确到分钟，区间为 [开始, 结束)，不影响服务端每日调度。修改后点击查询才应用。`;
 }
 
 /* ---------- 路由 ---------- */
 
 function currentRoute() {
   const route = location.hash.replace(/^#\//, '');
-  return ['overview', 'orders', 'ranking', 'users', 'rates', 'consumption', 'reports', 'settings'].includes(route) ? route : 'overview';
+  return ['overview', 'orders', 'ranking', 'users', 'reports', 'settings'].includes(route) ? route : 'overview';
 }
 
 function renderCurrent() {
   pageVersion++;
   const view = currentRoute();
-  $('range').classList.toggle('hidden', ['settings', 'reports', 'rates'].includes(view));
-  $('query-period').classList.toggle('hidden', ['settings', 'reports', 'rates'].includes(view));
-  document.querySelectorAll('dialog[open]').forEach((dialog) => dialog.close());
+  const routeChanged = !document.querySelector('#view-' + view + '.active');
+  const [title, eyebrow, description] = PAGE_META[view];
+  $('page-title').textContent = title;
+  $('route-label').textContent = title;
+  $('page-eyebrow').textContent = eyebrow;
+  $('page-description').textContent = description;
+  document.title = `${title} · new-api 财务后台`;
+  document.querySelector('.page-seal').replaceChildren(icon(view));
+  $('period-toolbar').classList.toggle('hidden', ['settings', 'reports'].includes(view));
+  $('range').classList.toggle('hidden', ['settings', 'reports'].includes(view));
   document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
   const target = $('view-' + view);
   if (!target) return;
   target.classList.add('active');
-  document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === view));
+  if (routeChanged) window.scrollTo({ top: 0, behavior: 'instant' });
+  document.querySelectorAll('.nav a').forEach((a) => {
+    const active = a.dataset.view === view;
+    a.classList.toggle('active', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
   if (view === 'overview') renderOverview();
   else if (view === 'orders') renderOrders();
   else if (view === 'ranking') renderRanking();
   else if (view === 'users') renderUsers();
-  else if (view === 'rates') renderRates();
-  else if (view === 'consumption') renderConsumption();
   else if (view === 'reports') renderReports();
   else if (view === 'settings') renderSettings();
 }
@@ -319,7 +347,7 @@ function niceCeil(v) {
 }
 
 function areaChart(points) {
-  const data = (points || []).map((p) => ({ date: (p.date || '').slice(5), money: Number(p.money) || 0 }));
+  const data = (points || []).map((p) => ({ date: (p.date || '').slice(5), fullDate: p.date || '', money: Number(p.money) || 0 }));
   if (!data.length) return null;
   const W = 640, H = 240, L = 52, R = 14, T = 18, B = 30;
   const iw = W - L - R, ih = H - T - B;
@@ -328,7 +356,7 @@ function areaChart(points) {
   const x = (i) => (n === 1 ? L + iw / 2 : L + (i / (n - 1)) * iw);
   const y = (v) => T + ih - (yTop === 0 ? 0 : (v / yTop) * ih);
 
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': '收入趋势，金额单位：元' });
   const areaColor = cssVar('--primary');
   const textColor = cssVar('--muted');
   const gridColor = cssVar('--line');
@@ -356,7 +384,11 @@ function areaChart(points) {
   svg.appendChild(svgEl('path', { d: linePath, fill: 'none', stroke: areaColor, 'stroke-width': 2.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
 
   data.forEach((d, i) => {
-    svg.appendChild(svgEl('circle', { cx: x(i), cy: y(d.money), r: 3, fill: cssVar('--bg'), stroke: areaColor, 'stroke-width': 2 }));
+    const point = svgEl('circle', { cx: x(i), cy: y(d.money), r: 3, fill: cssVar('--bg'), stroke: areaColor, 'stroke-width': 2 });
+    const title = svgEl('title', {});
+    title.textContent = `${d.fullDate} · ${fmtYuan(d.money)}`;
+    point.appendChild(title);
+    svg.appendChild(point);
     const step = Math.max(1, Math.ceil((n - 1) / 6));
     if (i !== n - 1 && (i % step !== 0 || (i > 0 && n - 1 - i < step))) return;
     const label = svgEl('text', { x: x(i), y: H - 8, 'text-anchor': 'middle', 'font-size': 11, fill: textColor });
@@ -370,18 +402,22 @@ function donut(items) {
   const total = items.reduce((s, i) => s + (Number(i.money) || 0), 0);
   if (total <= 0) return null;
   const size = 176, c = size / 2, r = 60, sw = 22;
-  const svg = svgEl('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, role: 'img' });
+  const svg = svgEl('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, role: 'img', 'aria-label': `支付方式金额占比，总金额 ${fmtYuan(total)}` });
   const palette = [1, 2, 3, 4, 5, 6].map((i) => cssVar(`--chart${i}`));
   let acc = 0;
   items.forEach((item, i) => {
     const frac = (Number(item.money) || 0) / total;
-    svg.appendChild(svgEl('circle', {
+    const segment = svgEl('circle', {
       cx: c, cy: c, r, fill: 'none', stroke: palette[i % palette.length], 'stroke-width': sw,
       pathLength: 100,
       'stroke-dasharray': `${(frac * 100).toFixed(2)} ${((1 - frac) * 100).toFixed(2)}`,
       'stroke-dashoffset': (-acc * 100).toFixed(2),
       transform: `rotate(-90 ${c} ${c})`,
-    }));
+    });
+    const title = svgEl('title', {});
+    title.textContent = `${item.label} · ${fmtYuan(item.money)} · ${(frac * 100).toFixed(1)}%`;
+    segment.appendChild(title);
+    svg.appendChild(segment);
     acc += frac;
   });
   const center = svgEl('text', { x: c, y: c - 2, 'text-anchor': 'middle', 'font-size': 20, 'font-weight': 700, fill: cssVar('--text') });
@@ -394,22 +430,26 @@ function donut(items) {
 }
 
 function legend(items) {
+  const total = items.reduce((sum, item) => sum + (Number(item.money) || 0), 0);
   const wrap = el('div', 'legend');
-  const palette = [1, 2, 3, 4, 5, 6].map((i) => cssVar(`--chart${i}`));
   items.forEach((item, i) => {
     const box = el('div', 'item');
-    const dot = el('span', 'dot');
-    dot.style.background = palette[i % palette.length];
+    const dot = el('span', `dot palette-${i % 6 + 1}`);
     box.appendChild(dot);
-    box.appendChild(el('span', '', `${item.label} · ${fmtYuan(item.money)}`));
+    const percent = total > 0 ? ((Number(item.money) || 0) / total * 100).toFixed(1) : '0.0';
+    box.appendChild(el('span', '', `${item.label} · ${fmtYuan(item.money)} · ${percent}%`));
     wrap.appendChild(box);
   });
   return wrap;
 }
 
-function kpi(label, value, sub, accent) {
+function kpi(label, value, sub, accent, name = 'wallet') {
   const node = el('div', 'kpi glass');
-  node.appendChild(el('div', 'label', label));
+  const head = el('div', 'kpi-head');
+  const symbol = el('span', 'kpi-symbol');
+  symbol.appendChild(icon(name));
+  head.append(el('div', 'label', label), symbol);
+  node.appendChild(head);
   node.appendChild(el('div', 'value', value));
   node.appendChild(el('div', 'sub', sub));
   if (accent) node.classList.add('accent');
@@ -423,8 +463,8 @@ async function renderOverview() {
   const root = $('view-overview');
   empty(root, '加载中…');
   const [sRes, tRes] = await Promise.all([
-    api(`/api/finance/summary?${periodQuery()}`),
-    api(`/api/finance/trend?${periodQuery()}`),
+    api(`/api/finance/summary?days=${currentRange}`),
+    api(`/api/finance/trend?days=${currentRange}`),
   ]);
   if (version !== pageVersion || !root.isConnected) return;
   if (sRes.status === 401 || tRes.status === 401) return showLogin();
@@ -435,24 +475,25 @@ async function renderOverview() {
   const trend = tRes.ok ? tRes.data : { points: [] };
 
   const kpis = el('div', 'kpi-grid');
-  kpis.appendChild(kpi('区间总收入', fmtYuan(sum.total.money), periodLabel(), true));
-  kpis.appendChild(kpi('订单笔数', String(sum.total.orders), '成功订单'));
-  kpis.appendChild(kpi('充值人数', String(sum.total.users), '去重用户'));
-  kpis.appendChild(kpi('今日收入', fmtYuan(sum.today.money), `今日 ${sum.today.orders} 笔`));
+  kpis.appendChild(kpi('区间总收入', fmtYuan(sum.total.money), `近 ${currentRange} 天`, true));
+  kpis.appendChild(kpi('订单笔数', String(sum.total.orders), '成功订单', false, 'orders'));
+  kpis.appendChild(kpi('充值人数', String(sum.total.users), '去重用户', false, 'users'));
+  kpis.appendChild(kpi('今日收入', fmtYuan(sum.today.money), `今日 ${sum.today.orders} 笔`, false, 'calendar'));
   root.appendChild(kpis);
 
-  const row = el('div', 'grid-2');
+  const row = el('div', 'grid-2 overview-charts');
   const trendCard = el('div', 'card glass');
-  trendCard.appendChild(el('h3', '', '收入趋势'));
+  trendCard.appendChild(sectionHeading('收入趋势', '成功订单收入 · 单位：元', 'trend', '01 / TREND'));
   const lineChart = areaChart(trend.points);
   const chartWrap = el('div', 'chart');
   if (lineChart) chartWrap.appendChild(lineChart);
-  else chartWrap.appendChild(el('div', 'empty', '暂无成功订单'));
+  else empty(chartWrap, tRes.ok ? '暂无成功订单' : (tRes.data.error || '趋势读取失败'));
   trendCard.appendChild(chartWrap);
+  trendCard.appendChild(el('p', 'chart-note', '按订单创建日期汇总 · 仅统计成功交易'));
   row.appendChild(trendCard);
 
   const methodCard = el('div', 'card glass');
-  methodCard.appendChild(el('h3', '', '支付方式'));
+  methodCard.appendChild(sectionHeading('支付分布', '各支付方式的成功金额占比', 'payment'));
   const donutBox = el('div', 'donut-wrap');
   const ring = donut(sum.methods);
   if (ring) { donutBox.appendChild(ring); donutBox.appendChild(legend(sum.methods)); }
@@ -462,25 +503,23 @@ async function renderOverview() {
   root.appendChild(row);
 
   const bdCard = el('div', 'card glass');
-  bdCard.appendChild(el('h3', '', '订单构成'));
+  bdCard.appendChild(sectionHeading('订单构成', '钱包充值与订阅开通的收入构成', 'layers', '02 / COMPOSITION'));
   bdCard.appendChild(breakdownBars(sum.breakdown || []));
   root.appendChild(bdCard);
 }
 
 function breakdownBars(items) {
   const max = Math.max(1, ...items.map((i) => Number(i.money) || 0));
-  const list = el('div', 'rank-list');
-  for (const item of items) {
-    const rowEl = el('div', 'rank-item glass');
-    rowEl.appendChild(el('div', 'who', item.label));
-    const bar = el('div', 'bar');
-    const fill = el('i');
-    fill.style.width = `${(((Number(item.money) || 0) / max) * 100).toFixed(1)}%`;
-    bar.appendChild(fill);
-    rowEl.appendChild(bar);
-    rowEl.appendChild(el('div', 'money', `${fmtYuan(item.money)} · ${item.orders} 笔`));
-    list.appendChild(rowEl);
-  }
+  const list = el('div', 'composition-list');
+  items.forEach((item, index) => {
+    const tile = el('div', 'composition-item');
+    const label = el('div', 'composition-label');
+    label.append(icon(index === 0 ? 'wallet' : 'layers'), el('span', '', item.label));
+    const value = el('div', 'composition-value');
+    value.append(el('strong', '', fmtYuan(item.money)), el('span', '', `${item.orders} 笔成功订单`));
+    tile.append(label, value, amountMeter(item.money, max));
+    list.appendChild(tile);
+  });
   return (items.length ? list : el('div', 'empty', '暂无数据'));
 }
 
@@ -490,10 +529,12 @@ async function renderOrders() {
   const root = $('view-orders');
   root.textContent = '';
 
-  const bar = el('div', 'card glass');
-  const top = el('div', 'actions');
-  top.style.marginTop = '0';
+  const tableCard = el('div', 'card glass');
+  tableCard.appendChild(sectionHeading('交易明细', '成功与失败订单 · 支持按当前条件导出', 'orders', 'LEDGER'));
+  const top = el('div', 'table-toolbar');
   const seg = el('div', 'seg', '');
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', '订单状态筛选');
   for (const [key, label] of [['success', '成功'], ['failed', '失败']]) {
     const btn = el('button', orderFilters.has(key) ? 'on' : '', label);
     btn.setAttribute('aria-pressed', String(orderFilters.has(key)));
@@ -509,14 +550,11 @@ async function renderOrders() {
   const exportBtn = el('a', 'btn small', '导出 CSV');
   exportBtn.id = 'orders-export';
   exportBtn.setAttribute('download', 'orders.csv');
+  addButtonIcon(exportBtn, 'download');
   top.appendChild(seg);
+  top.appendChild(el('span', 'toolbar-description', '超时订单计入失败'));
   top.appendChild(exportBtn);
-  top.appendChild(el('span', 'muted', '仅显示成功与失败，超时计入失败'));
-  bar.appendChild(top);
-  root.appendChild(bar);
-
-  const tableCard = el('div', 'card glass');
-  tableCard.appendChild(el('h3', '', '订单流水'));
+  tableCard.appendChild(top);
   const wrap = el('div', 'table-wrap');
   wrap.tabIndex = 0;
   wrap.setAttribute('aria-label', '订单流水，可横向滚动');
@@ -524,7 +562,7 @@ async function renderOrders() {
   const thead = el('thead', '');
   const headRow = el('tr', '');
   for (const text of ['时间', '类型', '状态', '订单号', '用户', '金额', '支付方式']) {
-    headRow.appendChild(el('th', '', text));
+    headRow.appendChild(el('th', text === '金额' ? 'num' : '', text));
   }
   thead.appendChild(headRow);
   table.appendChild(thead);
@@ -546,7 +584,7 @@ async function renderOrdersBody() {
   const request = ++orderRequest;
   const version = pageVersion;
   const filters = new Set(orderFilters);
-  const query = periodQuery({ status: [...filters].join(',') });
+  const query = new URLSearchParams({ days: String(currentRange), status: [...filters].join(',') });
   $('orders-export').href = `/api/orders/export.csv?${query}`;
   setMessage('orders-notice', '加载中…');
   const res = await api(`/api/orders?${query}`);
@@ -579,7 +617,7 @@ async function renderOrdersBody() {
     if (item.bucket === 'failed' && item.status === 'expired') {
       text = '失败 · 超时' + (item.derived ? '（推导）' : '');
     }
-    const badge = el('span', `badge ${item.bucket}`, text);
+    const badge = el('span', `badge ${item.status === 'expired' ? 'timeout' : item.bucket}`, text);
     const bdCell = el('td', '');
     bdCell.appendChild(badge);
     tr.appendChild(bdCell);
@@ -597,7 +635,7 @@ async function renderRanking() {
   const version = pageVersion;
   const root = $('view-ranking');
   empty(root, '加载中…');
-  const res = await api(`/api/finance/ranking?${periodQuery({ limit: '10' })}`);
+  const res = await api(`/api/finance/ranking?days=${currentRange}&limit=10`);
   if (version !== pageVersion || !root.isConnected) return;
   if (res.status === 401) return showLogin();
   root.textContent = '';
@@ -605,30 +643,39 @@ async function renderRanking() {
 
   const items = res.data.items || [];
   const card = el('div', 'card glass');
-  card.appendChild(el('h3', '', `充值排行榜（所选区间，前 ${items.length} 名）`));
+  card.appendChild(sectionHeading('周期充值榜', `近 ${currentRange} 天 · 前 ${items.length} 名 · 按成功金额排序`, 'ranking', 'TOP 10'));
   if (!items.length) {
     card.appendChild(el('div', 'empty', '暂无成功订单'));
     root.appendChild(card);
     return;
   }
+  const layout = el('div', 'ranking-layout');
+  const leader = items[0];
+  const spotlight = el('div', 'leader-card glass');
+  spotlight.appendChild(el('span', 'eyebrow', 'PERIOD LEADER / 01'));
+  const medal = el('div', 'leader-medallion');
+  medal.appendChild(icon('ranking'));
+  spotlight.append(medal, el('h2', 'leader-name', leader.name), el('span', 'muted', `用户 ID ${leader.user_id}`));
+  spotlight.appendChild(el('div', 'leader-amount', fmtYuan(leader.money)));
+  const facts = el('div', 'leader-facts');
+  facts.append(el('span', '', `${leader.orders} 笔成功订单`), el('span', '', `近 ${currentRange} 天充值金额领先`));
+  spotlight.appendChild(facts);
+  layout.appendChild(spotlight);
   const max = Math.max(1, ...items.map((i) => Number(i.money) || 0));
   const list = el('div', 'rank-list');
   items.forEach((item, index) => {
-    const rowEl = el('div', 'rank-item glass');
+    const rowEl = el('div', 'rank-item');
     const no = el('div', 'no', String(index + 1));
     if (index < 3) no.classList.add('top');
     rowEl.appendChild(no);
     rowEl.appendChild(el('div', 'who', `${item.name}（ID ${item.user_id}）`));
-    const bar = el('div', 'bar');
-    const fill = el('i');
-    fill.style.width = `${(((Number(item.money) || 0) / max) * 100).toFixed(1)}%`;
-    bar.appendChild(fill);
-    rowEl.appendChild(bar);
+    rowEl.appendChild(amountMeter(item.money, max));
     rowEl.appendChild(el('div', 'money', `${fmtYuan(item.money)} · ${item.orders} 笔`));
     list.appendChild(rowEl);
   });
   card.appendChild(list);
-  root.appendChild(card);
+  layout.appendChild(card);
+  root.appendChild(layout);
 }
 
 /* ---------- 用户画像 ---------- */
@@ -638,33 +685,24 @@ async function renderUsers() {
   const days = currentRange;
   const root = $('view-users');
   empty(root, '加载中…');
-  const res = await api(`/api/finance/users?${periodQuery()}`);
+  const res = await api(`/api/finance/users?days=${days}`);
   if (version !== pageVersion || !root.isConnected) return;
   if (res.status === 401) return showLogin();
   if (!res.ok) return empty(root, res.data.error || '加载用户画像失败');
   root.textContent = '';
-  const rechargeItems = res.data.items || [];
-  const consumptionUsers = res.data.consumption_users || [];
-  const currency = res.data.currency || 'CNY';
-  const merged = new Map(rechargeItems.map((item) => [String(item.user_id), { ...item }]));
-  for (const user of consumptionUsers) {
-    const key = String(user.user_id);
-    merged.set(key, { ...(merged.get(key) || { user_id: user.user_id, username: user.username,
-      total: 0, orders: 0, average: 0, wallet: 0, subscription: 0 }), consumption: user });
-  }
-  const items = [...merged.values()];
-  if (res.data.consumption_error) root.appendChild(el('p', 'bad', `消费数据读取失败：${res.data.consumption_error}`));
-  const total = rechargeItems.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const items = res.data.items || [];
+  const total = items.reduce((sum, item) => sum + Number(item.total || 0), 0);
   const orders = items.reduce((sum, item) => sum + Number(item.orders || 0), 0);
   const kpis = el('div', 'kpi-grid');
-  kpis.appendChild(kpi('周期充值用户', String(rechargeItems.length), '仅包含有成功订单的用户'));
-  kpis.appendChild(kpi('周期充值总额', fmtYuan(total), periodLabel(), true));
-  kpis.appendChild(kpi('周期成功订单', String(orders), '钱包充值 + 订阅开通'));
-  kpis.appendChild(kpi('周期平均客单价', fmtYuan(orders ? total / orders : 0), '成功金额 / 成功订单笔数'));
+  kpis.appendChild(kpi('周期充值用户', String(items.length), '仅包含有成功订单的用户', false, 'users'));
+  kpis.appendChild(kpi('周期充值总额', fmtYuan(total), `近 ${days} 天`, true));
+  kpis.appendChild(kpi('周期成功订单', String(orders), '钱包充值 + 订阅开通', false, 'orders'));
+  kpis.appendChild(kpi('周期平均客单价', fmtYuan(orders ? total / orders : 0), '成功金额 / 成功订单笔数', false, 'payment'));
   root.appendChild(kpis);
   const card = el('div', 'card glass');
-  card.appendChild(el('h3', '', '用户画像'));
-  card.appendChild(el('p', 'muted', '金额、笔数及首次 / 最近时间均来自所选周期内成功订单的创建时间，不代表用户全生命周期；钱包 / 订阅为充值金额，不是余额。'));
+  card.appendChild(sectionHeading('充值用户明细', '按用户聚合 · 钱包充值 / 订阅开通', 'users', 'CUSTOMERS'));
+  card.appendChild(infoStrip('金额、笔数及首次 / 最近时间均来自所选周期内成功订单的创建时间，不代表用户全生命周期；钱包 / 订阅为充值金额，不是余额。'));
+  const toolbar = el('div', 'user-toolbar');
   const field = el('div', 'field user-search');
   const label = el('label', '', '搜索用户名或用户 ID');
   label.htmlFor = 'users-search';
@@ -675,18 +713,19 @@ async function renderUsers() {
   search.value = userSearch;
   field.appendChild(label);
   field.appendChild(search);
-  card.appendChild(field);
+  toolbar.appendChild(field);
   const count = el('p', 'muted');
   count.setAttribute('role', 'status');
-  card.appendChild(count);
+  toolbar.appendChild(count);
+  card.appendChild(toolbar);
   const wrap = el('div', 'table-wrap');
   wrap.tabIndex = 0;
   wrap.setAttribute('aria-label', '用户画像统计表，可横向滚动');
   const table = el('table');
   const head = el('thead');
   const row = el('tr');
-  for (const text of ['用户 ID', '用户名', '周期充值总额', '成功笔数', '平均客单价', '钱包充值', '订阅开通', '周期内首次创建', '周期内最近创建', '消费额度', '消费金额 / 渠道明细']) {
-    row.appendChild(el('th', '', text));
+  for (const text of ['用户 ID', '用户名', '周期总额', '成功笔数', '平均客单价', '钱包充值', '订阅开通', '周期内首次创建', '周期内最近创建']) {
+    row.appendChild(el('th', ['周期总额', '成功笔数', '平均客单价', '钱包充值', '订阅开通'].includes(text) ? 'num' : '', text));
   }
   head.appendChild(row);
   table.appendChild(head);
@@ -697,21 +736,21 @@ async function renderUsers() {
   root.appendChild(card);
   search.addEventListener('input', () => {
     userSearch = search.value;
-    renderUserRows(body, count, items, userSearch, currency);
+    renderUserRows(body, count, items, userSearch);
   });
-  renderUserRows(body, count, items, userSearch, currency);
+  renderUserRows(body, count, items, userSearch);
 }
 
-function renderUserRows(body, count, items, query, currency) {
+function renderUserRows(body, count, items, query) {
   const term = query.trim().toLocaleLowerCase('zh-CN');
   const matches = items.filter((item) => String(item.user_id).includes(term)
     || String(item.username || '').toLocaleLowerCase('zh-CN').includes(term));
-  count.textContent = `匹配 ${matches.length} / ${items.length} 位周期充值或消费用户；上方充值指标为整个所选周期，不受搜索影响。`;
+  count.textContent = `匹配 ${matches.length} / ${items.length} 位周期充值用户；上方指标为整个所选周期，不受搜索影响。`;
   body.textContent = '';
   if (!matches.length) {
     const row = el('tr');
     const td = el('td', 'muted', items.length ? '没有匹配的用户' : '所选周期暂无成功订单用户');
-    td.colSpan = 11;
+    td.colSpan = 9;
     row.appendChild(td);
     body.appendChild(row);
     return;
@@ -725,617 +764,6 @@ function renderUserRows(body, count, items, query, currency) {
     for (const key of ['average', 'wallet', 'subscription']) row.appendChild(el('td', 'num', fmtYuan(item[key])));
     row.appendChild(el('td', '', formatTime(item.first_time)));
     row.appendChild(el('td', '', formatTime(item.last_time)));
-    row.appendChild(el('td', 'num', item.consumption ? fmtMoney(item.consumption.quota) : '—'));
-    const consumption = el('td');
-    consumption.appendChild(userConsumptionDetails(item.consumption || { user_id: item.user_id, username: item.username }, currency, item));
-    row.appendChild(consumption);
-    body.appendChild(row);
-  }
-}
-
-/* ---------- 计价比例 ---------- */
-
-function rateField(id, labelText, placeholder, hint) {
-  const field = el('div', 'field');
-  const label = el('label', '', labelText);
-  label.htmlFor = id;
-  const input = el('input');
-  input.id = id;
-  input.placeholder = placeholder || '';
-  input.autocomplete = 'off';
-  field.appendChild(label);
-  field.appendChild(input);
-  field.appendChild(el('span', 'hint', hint || ''));
-  return field;
-}
-
-function financeTable(root, title, headers, id) {
-  const card = el('div', 'card glass');
-  card.appendChild(el('h3', '', title));
-  const wrap = el('div', 'table-wrap');
-  wrap.tabIndex = 0;
-  wrap.setAttribute('aria-label', title + '，可横向滚动');
-  const table = el('table');
-  const head = el('thead');
-  const row = el('tr');
-  for (const text of headers) row.appendChild(el('th', '', text));
-  head.appendChild(row);
-  table.appendChild(head);
-  const body = el('tbody');
-  body.id = id;
-  table.appendChild(body);
-  wrap.appendChild(table);
-  card.appendChild(wrap);
-  root.appendChild(card);
-  return body;
-}
-
-function currencyAmounts(amounts, value, currency) {
-  if (value === null || value === undefined) return '未知（不完整）';
-  return fmtMoney(value, currency);
-}
-
-function userConsumptionDetails(user, currency, recharge) {
-  const button = el('button', 'btn small', '查看用户详情');
-  const interval = periodLabel();
-  button.addEventListener('click', () => {
-    const dialog = el('dialog', 'glass user-dialog');
-    const title = el('h2', '', `${user.username || `用户#${user.user_id}`} · 用户详情`);
-    title.id = 'user-detail-title';
-    dialog.setAttribute('aria-labelledby', title.id);
-    const close = el('button', 'btn', '关闭详情');
-    close.autofocus = true;
-    close.addEventListener('click', () => dialog.close());
-    const heading = el('div', 'dialog-heading');
-    heading.append(title, close);
-    dialog.append(heading, el('p', 'muted', `查询区间：${interval}（浏览器时区）；仅展示当前查询结果，不代表全生命周期。`));
-    const overview = el('div', 'kpi-grid');
-    overview.appendChild(kpi('充值总额', recharge ? fmtYuan(recharge.total) : '—', recharge ? `${recharge.orders} 笔成功订单` : '此页面未载入充值数据，请前往用户画像查询'));
-    if (recharge) {
-      overview.appendChild(kpi('钱包充值 / 订阅', `${fmtYuan(recharge.wallet)} / ${fmtYuan(recharge.subscription)}`, `平均客单价 ${fmtYuan(recharge.average)}`));
-    }
-    overview.appendChild(kpi('网站额度 / raw quota', fmtMoney(user.website_units), fmtMoney(user.quota)));
-    overview.appendChild(kpi('站点折算收入', currencyAmounts(user.money_by_currency, user.money, currency), user.income_complete ? '网站额度 / 站点比例，CNY；并非实收现金' : '站点比例缺失，收入未知而非零'));
-    dialog.appendChild(overview);
-    dialog.appendChild(el('p', user.income_complete ? 'ok' : 'bad', `${user.income_complete ? '收入折算完整' : '收入折算不完整或暂无消费数据'}；${(user.warnings || []).join('；') || '各渠道完整性见下表。'}`));
-    const body = financeTable(dialog, '各渠道消费结构', ['渠道', '网站额度', 'raw quota', '站点折算收入（CNY）', '渠道折算成本（CNY）', '折算利润', '完整性'], 'user-detail-channels');
-    for (const channel of user.channels || []) {
-      const row = el('tr');
-      for (const value of [
-        `${channel.name || '渠道'}（#${channel.channel_id}）`, fmtMoney(channel.website_units), fmtMoney(channel.quota),
-        currencyAmounts(channel.money_by_currency, channel.money ?? channel.income, currency) + (channel.income_complete ? '' : '（不完整）'),
-        currencyAmounts(channel.cost_by_currency, channel.cost, currency) + (channel.cost_configured ? '' : '（未完整配置）'),
-        fmtMoney(channel.profit, currency), `${channel.complete ? '完整' : '不完整'} ${(channel.warnings || []).join('；')}`,
-      ]) row.appendChild(el('td', '', value));
-      body.appendChild(row);
-    }
-    if (!body.children.length) tableEmpty(body, 7, '当前区间暂无渠道消费明细');
-    dialog.addEventListener('close', () => {
-      dialog.remove();
-      if (button.isConnected && button.closest('.view.active')) button.focus();
-    }, { once: true });
-    document.body.appendChild(dialog);
-    dialog.showModal();
-  });
-  return button;
-}
-
-let financeChannels = [];
-let financeItems = [];
-let financeLoaded = false;
-
-function channelStatus(channel) {
-  return ({ 1: '启用', 2: '手动禁用', 3: '自动禁用' })[channel.status] || String(channel.status ?? '状态未知');
-}
-
-function renderChannelOptions() {
-  if (!financeLoaded) return;
-  const root = $('finance-channel-options');
-  root.textContent = '';
-  const term = $('cf-search').value.trim().toLocaleLowerCase();
-  const matches = financeChannels.filter((channel) => `${channel.id ?? channel.channel_id} ${channel.name || channel.channel_name || ''} ${channelStatus(channel)}`.toLocaleLowerCase().includes(term));
-  $('cf-count').textContent = `共 ${financeChannels.length} 个渠道 · 匹配 ${matches.length} 个`;
-  for (const channel of matches) {
-    const id = channel.id ?? channel.channel_id;
-    const name = channel.name || channel.channel_name || '';
-    const button = el('button', 'channel-option', `#${id} · ${name || '未命名'} · ${channelStatus(channel)}`);
-    button.type = 'button';
-    button.addEventListener('click', () => {
-      $('cf-channel_id').value = id;
-      $('cf-channel_name').value = name;
-      const item = financeItems.find((item) => Number(item.channel_id) === Number(id));
-      $('cf-fee_rate').value = item && item.fee_currency === 'CNY' ? item.fee_rate : '';
-      updateRatePreview();
-      updateBackfillButton();
-      root.closest('details').open = false;
-      $('cf-channel_id').focus();
-    });
-    root.appendChild(button);
-  }
-  if (!matches.length) empty(root, financeChannels.length ? '没有匹配渠道，可手动填写 ID' : '暂无渠道，可手动填写 ID');
-}
-
-function parsedFeeRate() {
-  return Number($('cf-fee_rate').value.trim().replace(/^1\s*[:：]\s*/, ''));
-}
-
-function updateRatePreview() {
-  const rate = parsedFeeRate();
-  const valid = Number.isFinite(rate) && rate > 0;
-  $('cf-fee_rate').setAttribute('aria-invalid', String(Boolean($('cf-fee_rate').value) && !valid));
-  $('cf-preview').textContent = valid ? `换算预览：¥1 = ${fmtMoney(rate)} 网站额度；1 网站额度 = ¥${fmtMoney(1 / rate)}；500000 raw quota = 1 网站额度。` : '填写正数渠道成本比例查看换算，例如 1:7 或 7。';
-}
-
-let financeInitRunning = false;
-let financeInitPoll = 0;
-
-function updateBackfillButton() {
-  const button = $('cf-backfill');
-  if (!button) return;
-  const busy = financeInitRunning || button.getAttribute('aria-busy') === 'true';
-  button.disabled = busy || !financeLoaded || !financeItems.length;
-  button.title = '按已保存的最新比例，依次重算所有已配置渠道的历史财务；无需选择渠道';
-  button.textContent = busy ? '正在逐渠道初始化…' : '一键初始化历史财务';
-}
-
-function renderFinanceInit(data) {
-  financeInitRunning = data.status === 'running';
-  updateBackfillButton();
-  const done = Number(data.completed || 0);
-  const total = Number(data.total || 0);
-  const percent = total ? Math.floor(done / total * 100) : data.status === 'completed' ? 100 : 0;
-  $('cf-init-progress').value = percent;
-  $('cf-init-percent').textContent = `${percent}%`;
-  $('cf-init-count').textContent = `${done} / ${total} 个渠道`;
-  $('cf-init-summary').textContent = `成功 ${data.success || 0} · 跳过 ${data.skipped || 0} · 失败 ${data.failed || 0}`;
-  const current = data.current_channel;
-  const titles = { idle: '准备就绪', running: '正在逐渠道重算', completed: '初始化处理完成', failed: '初始化未完成' };
-  $('cf-init-state').textContent = titles[data.status] || '获取状态中';
-  $('cf-init-current').textContent = current ? `正在计算 ${current.channel_name || '渠道'} #${current.channel_id}` : data.status === 'completed' ? '历史计价已更新；失败渠道可核对后再次初始化。' : '先保存最新比例，再一键计算全部已配置渠道。';
-  const list = $('cf-init-results');
-  list.textContent = '';
-  for (const item of data.results || []) {
-    const row = el('div', `init-result ${item.status}`);
-    row.append(el('strong', '', `${item.channel_name || '渠道'} #${item.channel_id}`), el('span', '', `${({ success: '已完成', skipped: '已跳过', failed: '失败' })[item.status] || item.status} · ${item.message}`));
-    list.appendChild(row);
-  }
-  if (data.error) setMessage('cf-backfill-msg', data.error, data.status === 'failed' ? 'bad' : '');
-}
-
-async function pollFinanceInit(version) {
-  if (version !== pageVersion || !$('cf-init-progress')) return;
-  clearTimeout(financeInitPoll);
-  const res = await api('/api/channel-finance/initialize', { timeout: 15000 });
-  if (version !== pageVersion || !$('cf-init-progress')) return;
-  if (res.status === 401) return showLogin();
-  if (!res.ok) {
-    setMessage('cf-backfill-msg', '暂时无法获取进度，后台任务不受影响，正在重新连接…', 'bad');
-    financeInitPoll = setTimeout(() => pollFinanceInit(version), 3000);
-    return;
-  }
-  setMessage('cf-backfill-msg', '');
-  const wasRunning = financeInitRunning;
-  renderFinanceInit(res.data);
-  if (financeInitRunning) financeInitPoll = setTimeout(() => pollFinanceInit(version), 1000);
-  else if (wasRunning) await loadChannelFinance();
-}
-
-async function backfillChannel() {
-  const version = pageVersion;
-  setMessage('cf-backfill-msg', '正在启动初始化任务…');
-  const result = await api('/api/channel-finance/initialize', { method: 'POST', timeout: 15000, body: {} });
-  if (version !== pageVersion) return;
-  if (result.status === 401) return showLogin();
-  if (!result.ok) setMessage('cf-backfill-msg', result.data.error || '启动结果未知，正在核对后台状态', 'bad');
-  else {
-    setMessage('cf-backfill-msg', '');
-    renderFinanceInit(result.data);
-    if (result.data.status === 'completed') await loadChannelFinance();
-  }
-  if (result.ok || result.status === 0) await pollFinanceInit(version);
-}
-
-function buildChannelFinance(root) {
-  const card = el('div', 'card glass');
-  card.appendChild(el('h3', '', '渠道财务配置'));
-  card.appendChild(el('p', 'muted', '渠道比例 1:N 表示 1 元人民币兑换 N 网站额度，渠道折算成本 = 网站额度 / 渠道比例。站点收入独立使用站点比例。新增、修改、删除默认仅向后生效；一键初始化历史财务才覆盖过去。旧单价只保留审计，不参与计算。'));
-  const grid = el('div', 'grid');
-  for (const [key, label, hint] of [
-    ['channel_id', '渠道 ID', '渠道唯一标识（正整数）'], ['channel_name', '渠道名称', '仅用于展示'],
-    ['fee_currency', '计价货币（固定 CNY）', '新配置只能使用 CNY'], ['fee_rate', '渠道成本比例 1:N', '1:7 表示 1 元人民币兑换 7 网站额度'],
-  ]) grid.appendChild(rateField(`cf-${key}`, label, '', hint));
-  $('view-rates').appendChild(card);
-  card.appendChild(grid);
-  const picker = el('details', 'channel-picker');
-  picker.appendChild(el('summary', '', '选择渠道 · 可搜索全部渠道'));
-  picker.appendChild(rateField('cf-search', '搜索渠道 ID / 名称 / 状态', '输入关键词', '选择后自动填写 ID 和名称；也可关闭选择器手填未知 ID。'));
-  const count = el('p', 'muted');
-  count.id = 'cf-count';
-  count.setAttribute('role', 'status');
-  const list = el('div', 'channel-options');
-  list.id = 'finance-channel-options';
-  list.setAttribute('role', 'group');
-  list.setAttribute('aria-label', '渠道选择结果');
-  const retry = el('button', 'btn small', '重新加载渠道');
-  retry.id = 'cf-retry';
-  retry.addEventListener('click', loadChannelFinance);
-  picker.append(count, list, retry);
-  card.insertBefore(picker, grid);
-  $('cf-search').type = 'search';
-  $('cf-search').addEventListener('input', renderChannelOptions);
-  $('cf-channel_id').inputMode = 'numeric';
-  $('cf-channel_id').addEventListener('input', () => {
-    const channel = financeChannels.find((item) => String(item.id ?? item.channel_id) === $('cf-channel_id').value.trim());
-    if (channel) $('cf-channel_name').value = channel.name || channel.channel_name || '';
-    updateBackfillButton();
-  });
-  const preview = el('p', 'conversion-preview');
-  preview.id = 'cf-preview';
-  preview.setAttribute('role', 'status');
-  card.appendChild(preview);
-  $('cf-fee_rate').addEventListener('input', updateRatePreview);
-  updateRatePreview();
-  $('cf-fee_currency').value = 'CNY';
-  $('cf-fee_currency').disabled = true;
-  const actions = el('div', 'actions');
-  const save = el('button', 'btn primary', '新增 / 保存渠道配置');
-  save.id = 'cf-save';
-  const reset = el('button', 'btn ghost', '新建 / 清空');
-  reset.addEventListener('click', () => {
-    for (const key of ['channel_id', 'channel_name', 'fee_rate']) $(`cf-${key}`).value = '';
-    updateRatePreview();
-    updateBackfillButton();
-    setMessage('cf-backfill-msg', '');
-  });
-  const msg = el('span', 'muted');
-  msg.id = 'cf-msg';
-  msg.setAttribute('role', 'status');
-  actions.append(save, reset, msg);
-  card.appendChild(actions);
-  const initPanel = el('section', 'finance-init-panel');
-  const heading = el('div', 'init-heading');
-  const intro = el('div');
-  intro.append(el('span', 'init-eyebrow', '历史财务 · 批量初始化'), el('h3', '', '保存新比例，一键重新计算'));
-  const percent = el('strong', 'init-percent', '0%');
-  percent.id = 'cf-init-percent';
-  heading.append(intro, percent);
-  initPanel.append(heading, el('p', 'muted', '按当前站点比例和各渠道最新已保存比例，依次覆盖全部过去计价；不需要选择渠道。可重复初始化，不修改源日志。未配置的渠道不参与，处理失败的渠道保留原结果。'));
-  const progress = el('progress', 'init-progress');
-  progress.id = 'cf-init-progress';
-  progress.max = 100;
-  progress.value = 0;
-  progress.setAttribute('aria-label', '历史财务初始化完成进度');
-  const metrics = el('div', 'init-metrics');
-  for (const [id, text] of [['cf-init-state', '准备就绪'], ['cf-init-count', '0 / 0 个渠道'], ['cf-init-summary', '成功 0 · 跳过 0 · 失败 0']]) {
-    const item = el('span', '', text);
-    item.id = id;
-    metrics.appendChild(item);
-  }
-  const current = el('p', 'init-current', '先保存最新比例，再点击下方按钮开始。');
-  current.id = 'cf-init-current';
-  current.setAttribute('role', 'status');
-  const details = el('details', 'init-details');
-  details.appendChild(el('summary', '', '查看逐渠道处理结果'));
-  const results = el('div', 'init-results');
-  results.id = 'cf-init-results';
-  details.appendChild(results);
-  initPanel.append(progress, metrics, current, details);
-  const backfillActions = el('div', 'actions');
-  const backfill = el('button', 'btn primary', '一键初始化历史财务');
-  backfill.id = 'cf-backfill';
-  backfill.disabled = true;
-  const backfillMessage = el('span', 'muted');
-  backfillMessage.id = 'cf-backfill-msg';
-  backfillMessage.setAttribute('role', 'status');
-  backfillActions.append(backfill, backfillMessage);
-  initPanel.appendChild(backfillActions);
-  card.appendChild(initPanel);
-  bindBusyAction('cf-backfill', 'cf-backfill-msg', backfillChannel);
-  pollFinanceInit(pageVersion);
-  financeTable(root, '当前渠道财务配置', ['渠道', '货币', '渠道成本比例 1:N', '生效时间', '操作'], 'cf-current');
-  const history = el('details', 'finance-details');
-  history.appendChild(el('summary', '', '查看渠道配置历史（只读）'));
-  financeTable(history, '历史生效快照', ['生效时间', '渠道', '事件', '历史货币', '渠道成本比例 1:N', '旧成本货币（停用）', '旧 raw quota 单价（停用）'], 'cf-history');
-  root.appendChild(history);
-  bindBusyAction('cf-save', 'cf-msg', async () => {
-    const body = {};
-    for (const key of ['channel_id', 'channel_name', 'fee_currency', 'fee_rate']) body[key] = $(`cf-${key}`).value.trim();
-    if (!/^\d+$/.test(body.channel_id) || Number(body.channel_id) <= 0) return setMessage('cf-msg', '请填写正整数渠道 ID', 'bad');
-    if (!Number.isSafeInteger(Number(body.channel_id))) return setMessage('cf-msg', '渠道 ID 超出有效范围', 'bad');
-    if (!Number.isFinite(parsedFeeRate()) || parsedFeeRate() <= 0) {
-      $('cf-fee_rate').focus();
-      return setMessage('cf-msg', '渠道成本比例必须为正数，例如 1:7 或 7', 'bad');
-    }
-    body.channel_id = Number(body.channel_id);
-    await writeChannelFinance('/api/channel-finance', body);
-  });
-}
-
-async function writeChannelFinance(path, body) {
-  const version = pageVersion;
-  ratesRequest++;
-  setMessage('cf-msg', '保存中…');
-  const res = await api(path, { method: 'POST', body });
-  if (version !== pageVersion) return;
-  if (res.status === 401) return showLogin();
-  if (!res.ok) return setMessage('cf-msg', res.data.error || '保存失败', 'bad');
-  setMessage('cf-msg', '已保存，从现在起生效；历史配置与账务保留', 'ok');
-  await loadChannelFinance();
-}
-
-async function loadChannelFinance() {
-  const request = ++ratesRequest;
-  const version = pageVersion;
-  financeLoaded = false;
-  updateBackfillButton();
-  $('cf-count').textContent = '正在加载全部渠道…';
-  empty($('finance-channel-options'), '加载中…');
-  const res = await api('/api/channel-finance', { timeout: 30000 });
-  if (request !== ratesRequest || version !== pageVersion) return;
-  if (res.status === 401) return showLogin();
-  if (!res.ok) {
-    $('cf-count').textContent = '渠道加载失败，请重新加载；仍可手动填写 ID。';
-    empty($('finance-channel-options'), res.data.error || '读取渠道失败');
-    for (const id of ['cf-current', 'cf-history']) {
-      $(id).textContent = '';
-      tableEmpty($(id), id === 'cf-current' ? 5 : 7, '读取失败，请重新加载');
-    }
-    return setMessage('cf-msg', res.data.error || '读取渠道财务配置失败', 'bad');
-  }
-  financeLoaded = true;
-  financeChannels = res.data.channels || [];
-  financeItems = res.data.items || [];
-  renderChannelOptions();
-  updateBackfillButton();
-  const body = $('cf-current');
-  body.textContent = '';
-  for (const item of res.data.items || []) {
-    const row = el('tr');
-    for (const text of [`${item.channel_name || '渠道'}（#${item.channel_id}）`, item.fee_currency, fmtRate(item.fee_rate), formatTime(item.updated_at)]) row.appendChild(el('td', '', text));
-    const cell = el('td');
-    const edit = el('button', 'btn small', '修改');
-    edit.addEventListener('click', () => {
-      for (const key of ['channel_id', 'channel_name']) $(`cf-${key}`).value = item[key] ?? '';
-      $('cf-fee_currency').value = 'CNY';
-      $('cf-fee_rate').value = item.fee_currency === 'CNY' ? (item.fee_rate ?? '') : '';
-      setMessage('cf-msg', item.fee_currency === 'CNY' ? '已载入配置' : '该历史配置使用非 CNY 计价币种，仅展示；新保存必须重新填写 CNY 渠道成本比例', item.fee_currency === 'CNY' ? 'muted' : 'bad');
-      updateRatePreview();
-      updateBackfillButton();
-      $('cf-channel_id').focus();
-    });
-    const remove = el('button', 'btn small ghost', '删除');
-    remove.id = `cf-delete-${item.channel_id}`;
-    cell.append(edit, remove);
-    row.appendChild(cell);
-    body.appendChild(row);
-    bindBusyAction(remove.id, 'cf-msg', async () => {
-      if (confirm(`删除渠道 #${item.channel_id} 当前配置？历史记录仍保留。`)) await writeChannelFinance('/api/channel-finance/delete', { channel_id: item.channel_id });
-    });
-  }
-  if (!body.children.length) tableEmpty(body, 5, '暂无渠道配置；未配置渠道比例时成本未知，站点收入由独立站点比例计算');
-  const history = $('cf-history');
-  history.textContent = '';
-  for (const item of res.data.history || []) {
-    const row = el('tr');
-    for (const text of [formatTime(item.effective_at), `${item.channel_name || '渠道'}（#${item.channel_id}）`, item.deleted || item.action === 'delete' ? '删除' : '保存', item.fee_currency || '—', fmtRate(item.fee_rate), item.cost_currency || '—', fmtMoney(item.cost_per_quota)]) row.appendChild(el('td', '', text));
-    history.appendChild(row);
-  }
-  if (!history.children.length) tableEmpty(history, 7, '暂无历史快照');
-  const overrides = $('cf-overrides');
-  overrides.textContent = '';
-  for (const item of res.data.overrides || []) {
-    const row = el('tr');
-    for (const text of [`#${item.channel_id}`, `[${formatTime(item.start_ts)}, ${formatTime(item.end_ts)})`, fmtRate(item.site_rate), fmtRate(item.channel_rate), formatTime(item.created_at)]) row.appendChild(el('td', '', text));
-    overrides.appendChild(row);
-  }
-  if (!overrides.children.length) tableEmpty(overrides, 5, '暂无全量重算记录');
-}
-
-function tableEmpty(body, columns, text) {
-  const row = el('tr');
-  const cell = el('td', 'muted', text);
-  cell.colSpan = columns;
-  row.appendChild(cell);
-  body.appendChild(row);
-}
-
-function buildRates() {
-  const root = $('view-rates');
-  root.textContent = '';
-  const card = el('div', 'card glass');
-  card.appendChild(el('h3', '', '站点比例 · 折算收入'));
-  card.appendChild(el('p', 'muted', '网站额度 = raw quota / 500000；站点收入 = 网站额度 / 站点比例；渠道成本 = 网站额度 / 渠道比例；利润 = 收入 - 成本。均为 CNY，均按 1 元兑换 N 网站额度。日常保存仅向后生效。'));
-  card.appendChild(rateField('site-rate', '站点比例 1:N', '例如 1:7', '独立于渠道成本比例，不自动采用旧全局汇率'));
-  card.appendChild(rateField('site-note', '备注', '', '保存历史以供审计'));
-  const save = el('button', 'btn primary', '保存站点比例');
-  save.id = 'site-save';
-  const msg = el('p', 'muted');
-  msg.id = 'site-msg';
-  msg.setAttribute('role', 'status');
-  card.append(save, msg);
-  root.appendChild(card);
-  financeTable(root, '站点比例历史（只读）', ['生效时间', '站点比例 1:N', '备注'], 'site-history');
-  buildChannelFinance(root);
-  financeTable(root, '全量重算审计（最新覆盖优先）', ['渠道', '覆盖区间', '站点比例', '渠道比例', '确认时间'], 'cf-overrides');
-  bindBusyAction('site-save', 'site-msg', async () => {
-    const version = pageVersion;
-    const res = await api('/api/site-rate', { method: 'POST', body: { rate: $('site-rate').value.trim(), note: $('site-note').value.trim() } });
-    if (version !== pageVersion) return;
-    if (res.status === 401) return showLogin();
-    setMessage('site-msg', res.ok ? '已保存，仅向后生效；如需覆盖历史，请点击一键初始化历史财务' : res.data.error, res.ok ? 'ok' : 'bad');
-    if (res.ok) await loadRates();
-  });
-  ratesBuilt = true;
-}
-
-async function loadRates() {
-  const request = ++fallbackRequest;
-  const version = pageVersion;
-  const res = await api('/api/site-rate');
-  if (request !== fallbackRequest || version !== pageVersion) return;
-  if (res.status === 401) return showLogin();
-  if (!res.ok) return setMessage('site-msg', res.data.error || '读取站点比例失败', 'bad');
-  const body = $('site-history');
-  body.textContent = '';
-  for (const item of res.data.history || []) {
-    const row = el('tr');
-    for (const value of [formatTime(item.effective_at), fmtRate(item.rate), item.note]) row.appendChild(el('td', '', value));
-    body.appendChild(row);
-  }
-  if (!body.children.length) tableEmpty(body, 3, '尚未配置站点比例，站点收入未知');
-}
-
-async function renderRates() {
-  if (!ratesBuilt) buildRates();
-  await Promise.all([loadRates(), loadChannelFinance()]);
-}
-
-/* ---------- 消耗统计 ---------- */
-
-function buildConsumption() {
-  const root = $('view-consumption');
-  root.textContent = '';
-
-  const notice = el('p', 'muted', '');
-  notice.id = 'consumption-msg';
-  notice.setAttribute('role', 'status');
-  root.appendChild(notice);
-
-  const kpis = el('div', 'kpi-grid');
-  kpis.id = 'consumption-kpis';
-  root.appendChild(kpis);
-
-  const configLink = el('a', 'btn small', '前往渠道财务配置');
-  configLink.href = '#/rates';
-  root.appendChild(configLink);
-  root.appendChild(el('p', 'muted', '网站额度 = raw quota / 500000；站点折算收入 = 网站额度 / 站点比例；渠道折算成本 = 网站额度 / 渠道比例；折算利润 = 收入 - 成本。均为 CNY，两个比例均表示 1 元兑换 N 网站额度；按日志时间或显式重算覆盖规则计价，缺比例时相应金额未知。'));
-  financeTable(root, '站点折算收入前五名（未知排后）', ['用户', '网站额度 / raw quota', '站点折算收入 / 渠道明细'], 'consumption-top-users');
-
-  const channelCard = el('div', 'card glass');
-  channelCard.appendChild(el('h3', '', '渠道收入、成本与利润'));
-  const channelWrap = el('div', 'table-wrap');
-  channelWrap.tabIndex = 0;
-  channelWrap.setAttribute('aria-label', '渠道收入、成本与利润明细表');
-  const channelTable = el('table');
-  const channelHead = el('thead');
-  const channelHeadRow = el('tr');
-  for (const text of ['渠道', '网站额度 / raw quota', '站点折算收入（CNY）', '渠道折算成本（CNY）', '折算利润', '配置状态']) channelHeadRow.appendChild(el('th', '', text));
-  channelHead.appendChild(channelHeadRow);
-  channelTable.appendChild(channelHead);
-  const channelBody = el('tbody');
-  channelBody.id = 'consumption-channels';
-  channelTable.appendChild(channelBody);
-  channelWrap.appendChild(channelTable);
-  channelCard.appendChild(channelWrap);
-  root.appendChild(channelCard);
-
-  const userCard = el('div', 'card glass');
-  userCard.appendChild(el('h3', '', '用户消耗排行'));
-  const userWrap = el('div', 'table-wrap');
-  userWrap.tabIndex = 0;
-  userWrap.setAttribute('aria-label', '用户消耗排行表');
-  const userTable = el('table');
-  const userHead = el('thead');
-  const userHeadRow = el('tr');
-  for (const text of ['用户', '网站额度 / raw quota', '折算人民币消费']) userHeadRow.appendChild(el('th', '', text));
-  userHead.appendChild(userHeadRow);
-  userTable.appendChild(userHead);
-  const userBody = el('tbody');
-  userBody.id = 'consumption-users';
-  userTable.appendChild(userBody);
-  userWrap.appendChild(userTable);
-  userCard.appendChild(userWrap);
-  root.appendChild(userCard);
-
-  consumptionBuilt = true;
-}
-
-async function renderConsumption() {
-  if (!consumptionBuilt) buildConsumption();
-  await loadConsumption();
-}
-
-async function loadConsumption() {
-  const request = ++consumptionRequest;
-  const version = pageVersion;
-  setMessage('consumption-msg', '加载中…');
-  for (const id of ['consumption-channels', 'consumption-users', 'consumption-top-users']) {
-    $(id).textContent = '';
-    tableEmpty($(id), id === 'consumption-channels' ? 6 : 3, '加载中…');
-  }
-  const { ok, status, data } = await api(`/api/consumption?${periodQuery()}`);
-  if (request !== consumptionRequest || version !== pageVersion) return;
-  if (status === 401) return showLogin();
-  if (!ok) {
-    setMessage('consumption-msg', data.error || '读取消耗统计失败', 'bad');
-    const kpis = $('consumption-kpis');
-    if (kpis) empty(kpis, '加载失败');
-    return;
-  }
-  const warnings = data.warnings || [];
-  setMessage('consumption-msg', `${data.complete ? '账务完整' : '账务不完整，利润不可准确计算'}${warnings.length ? '：' + warnings.join('；') : ''}`, data.complete ? 'ok' : 'bad');
-  renderConsumptionKpis(data);
-  renderConsumptionChannels(data.channels || [], data.currency || 'CNY');
-  renderConsumptionUsers(data.users || [], data.currency || 'CNY');
-  renderConsumptionUsers((data.top_users || []).slice(0, 5), data.currency || 'CNY', 'consumption-top-users');
-}
-
-function renderConsumptionKpis(data) {
-  const kpis = $('consumption-kpis');
-  if (!kpis) return;
-  kpis.textContent = '';
-  const currency = data.currency || 'CNY';
-  kpis.appendChild(kpi('网站额度消耗', `${fmtMoney(data.website_units)} · raw quota ${fmtMoney(data.quota)}`, periodLabel()));
-  kpis.appendChild(kpi('站点折算收入', fmtMoney(data.user_money, currency), '网站额度 / 站点比例；缺比例时未知', true));
-  kpis.appendChild(kpi('渠道折算成本', fmtMoney(data.upstream_cost, currency), '网站额度 / 渠道比例；缺比例时未知'));
-  kpis.appendChild(kpi('折算利润', fmtMoney(data.profit, currency), data.complete ? '站点折算收入 - 渠道折算成本' : '比例缺失，无法准确计算'));
-}
-
-function renderConsumptionChannels(channels, currency) {
-  const body = $('consumption-channels');
-  if (!body) return;
-  body.textContent = '';
-  if (!channels.length) {
-    const row = el('tr');
-    const td = el('td', 'muted', '暂无消耗数据');
-    td.colSpan = 6;
-    row.appendChild(td);
-    body.appendChild(row);
-    return;
-  }
-  for (const item of channels) {
-    const row = el('tr');
-    row.appendChild(el('td', '', `${item.name || '渠道'}（#${item.channel_id}）`));
-    row.appendChild(el('td', 'num', `${fmtMoney(item.website_units)} · ${fmtMoney(item.quota)} raw quota`));
-    row.appendChild(el('td', 'num', currencyAmounts(item.money_by_currency, item.income, item.income_currency || currency)
-      + (item.income_complete ? '' : '（不完整）')));
-    row.appendChild(el('td', 'num', currencyAmounts(item.cost_by_currency, item.cost, item.cost_currency || currency)
-      + (item.cost_configured ? '' : '（成本不完整 / 未配置）')));
-    row.appendChild(el('td', 'num', fmtMoney(item.profit, currency)));
-    row.appendChild(el('td', item.complete ? 'ok' : 'bad', item.complete ? '完整' : `不完整 ${(item.warnings || []).join('；')}`));
-    body.appendChild(row);
-  }
-}
-
-function renderConsumptionUsers(users, currency, target = 'consumption-users') {
-  const body = $(target);
-  if (!body) return;
-  body.textContent = '';
-  if (!users.length) {
-    const row = el('tr');
-    const td = el('td', 'muted', '暂无消耗数据');
-    td.colSpan = 3;
-    row.appendChild(td);
-    body.appendChild(row);
-    return;
-  }
-  for (const item of users) {
-    const row = el('tr');
-    row.appendChild(el('td', '', item.username || `用户#${item.user_id}`));
-    row.appendChild(el('td', 'num', `${fmtMoney(item.website_units)} · ${fmtMoney(item.quota)} raw quota`));
-    const details = el('td');
-    details.appendChild(userConsumptionDetails(item, currency));
-    row.appendChild(details);
     body.appendChild(row);
   }
 }
@@ -1350,78 +778,26 @@ async function renderReports() {
 function buildReports() {
   const root = $('view-reports');
   root.textContent = '';
-  root.appendChild(el('p', 'muted', '自动报表使用已保存并生效的开关；手动发送不受开关与去重限制，也不会更新最近定时成功周期。时间以服务端时区为准，与顶部订单统计周期无关。'));
-  const link = el('a', 'btn small', '前往设置修改定时开关与钉钉参数');
+  const intro = el('div', 'report-intro');
+  intro.appendChild(infoStrip('自动报表使用已保存并生效的开关；手动发送不受开关与去重限制，也不会更新最近定时成功周期。时间以服务端时区为准，与订单统计周期无关。'));
+  const link = addButtonIcon(el('a', 'btn small', '配置定时与钉钉参数'), 'settings');
   link.href = '#/settings';
-  root.appendChild(link);
-  const consume = el('div', 'card glass report-grid');
-  consume.appendChild(el('h3', '', '每日消耗财务报表'));
-  consume.appendChild(el('p', 'muted', '使用服务端时区，推送前一天网站额度、raw quota、站点折算收入、渠道折算成本、折算利润及按站点收入排序的前五名；不影响原有实收充值日报 / 周报。'));
-  const consumeState = el('p', 'muted');
-  consumeState.id = 'consume-daily-state';
-  consume.appendChild(consumeState);
-  const gridFields = el('div', 'grid');
-  const enabledField = el('div', 'field');
-  const enabledLabel = el('label', '', '启用每日财务推送');
-  enabledLabel.htmlFor = 'report-consume-enabled';
-  const enabled = el('input');
-  enabled.type = 'checkbox';
-  enabled.id = 'report-consume-enabled';
-  enabled.disabled = true;
-  enabledField.append(enabledLabel, enabled);
-  gridFields.appendChild(enabledField);
-  gridFields.appendChild(rateField('report-consume-time', '每日推送时间', 'HH:MM', '服务端时区，24 小时制'));
-  consume.appendChild(gridFields);
-  root.appendChild(consume);
-  $('report-consume-time').type = 'time';
-  $('report-consume-time').disabled = true;
-  for (const input of [enabled, $('report-consume-time')]) input.addEventListener('input', () => { input.dataset.dirty = 'true'; });
-  const actions = el('div', 'actions');
-  const save = el('button', 'btn primary', '保存每日财务计划');
-  save.id = 'consume-daily-save';
-  save.disabled = true;
-  const msg = el('span', 'muted');
-  msg.id = 'consume-daily-msg';
-  msg.setAttribute('role', 'status');
-  actions.append(save, msg);
-  consume.appendChild(actions);
-  financeTable(consume, '每日财务推送运行记录', ['统计日期', '状态', '详情', '执行时间'], 'consume-daily-runs');
-  bindBusyAction(save.id, msg.id, async () => {
-    const time = $('report-consume-time').value;
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return setMessage(msg.id, '时间必须为 HH:MM', 'bad');
-    const version = pageVersion;
-    const config = { consume_daily_report_enabled: enabled.checked, consume_daily_report_time: time };
-    reportsRequest++;
-    const res = await api('/api/config', { method: 'POST', body: { config } });
-    if (res.ok) { configLoaded = false; configRequest++; }
-    if (version !== pageVersion) return;
-    if (res.status === 401) return showLogin();
-    if (!res.ok) return setMessage(msg.id, res.data.error || '保存失败', 'bad');
-    for (const key of Object.keys(config)) {
-      const field = inputs[key];
-      if (field && field.dataset.dirty !== 'true') {
-        if (BOOL_KEYS.has(key)) field.checked = config[key]; else field.value = config[key];
-      }
-    }
-    setMessage(msg.id, (res.data.warnings || []).join('；') || '每日财务计划已保存并生效', (res.data.warnings || []).length ? 'bad' : 'ok');
-    if (enabled.checked === config.consume_daily_report_enabled) delete enabled.dataset.dirty;
-    if ($('report-consume-time').value === time) delete $('report-consume-time').dataset.dirty;
-    await loadReports();
-  });
+  intro.appendChild(link);
+  root.appendChild(intro);
   const grid = el('div', 'grid-2 report-grid');
   for (const [kind, title, schedule, actionText] of [
     ['daily', '每日充值统计', '每天 00:00 推送前一天的成功充值与排行榜', '立即生成今日统计'],
     ['weekly', '每周充值统计', '每周一 00:00 推送上一个完整自然周的成功充值与排行榜', '立即生成本周统计'],
   ]) {
-    const card = el('div', 'card glass');
-    card.appendChild(el('h3', '', title));
-    card.appendChild(el('p', 'muted', schedule));
+    const card = el('div', 'card glass report-card');
+    card.appendChild(sectionHeading(title, kind === 'daily' ? 'DAILY REPORT' : 'WEEKLY REPORT', kind === 'daily' ? 'calendar' : 'reports'));
+    card.appendChild(el('p', 'report-schedule', schedule));
     const state = el('div', 'report-state');
     state.id = `${kind}-state`;
     card.appendChild(state);
     card.appendChild(el('p', 'muted', '手动发送截至当前的统计；使用设置中尚未保存的钉钉参数（留空沿用已保存值）。'));
     const actions = el('div', 'actions');
-    const button = el('button', 'btn', actionText);
+    const button = addButtonIcon(el('button', 'btn', actionText), 'send');
     button.id = kind;
     actions.appendChild(button);
     const message = el('span', 'muted');
@@ -1436,11 +812,12 @@ function buildReports() {
   notice.id = 'reports-msg';
   notice.setAttribute('role', 'status');
   root.appendChild(notice);
-  const history = el('div', 'card glass');
+  const history = el('div', 'card glass history-card');
   const histHead = el('div', 'actions');
   histHead.appendChild(el('h3', '', '最近推送记录（订单 / 日报 / 周报）'));
   for (const [id, text] of [['refresh', '刷新'], ['clear', '清空记录']]) {
-    const button = el('button', 'btn small ghost', text);
+    const button = el('button', id === 'clear' ? 'btn small ghost danger' : 'btn small ghost', text);
+    if (id === 'refresh') addButtonIcon(button, 'refresh');
     button.id = id;
     histHead.appendChild(button);
   }
@@ -1452,7 +829,7 @@ function buildReports() {
   const thead = el('thead');
   const headRow = el('tr');
   for (const text of ['时间', '状态', '订单号 / 报表周期', '用户', '金额', '原因 / 统计摘要', '来源', '推送']) {
-    headRow.appendChild(el('th', '', text));
+    headRow.appendChild(el('th', text === '金额' ? 'num' : '', text));
   }
   thead.appendChild(headRow);
   table.appendChild(thead);
@@ -1504,22 +881,6 @@ async function loadReports() {
     for (const kind of ['daily', 'weekly']) empty($(`${kind}-state`), '定时状态未知');
     return setMessage('reports-msg', data.error || '读取报表状态失败，请刷新重试', 'bad');
   }
-  const enabled = $('report-consume-enabled');
-  const time = $('report-consume-time');
-  if (enabled.dataset.dirty !== 'true') enabled.checked = Boolean(data.consume_daily_report_enabled);
-  if (time.dataset.dirty !== 'true') time.value = data.consume_daily_report_time || '00:00';
-  enabled.disabled = false;
-  time.disabled = false;
-  if ($('consume-daily-save').getAttribute('aria-busy') !== 'true') $('consume-daily-save').disabled = false;
-  $('consume-daily-state').textContent = `已生效计划：${data.consume_daily_report_enabled ? '开启' : '关闭'} · 每天 ${data.consume_daily_report_time || '00:00'}（服务端时区）`;
-  const runs = $('consume-daily-runs');
-  runs.textContent = '';
-  for (const run of data.consume_daily_runs || []) {
-    const row = el('tr');
-    for (const text of [run.day, run.status, run.detail || '—', formatTime(run.finished_at || run.started_at)]) row.appendChild(el('td', '', text));
-    runs.appendChild(row);
-  }
-  if (!runs.children.length) tableEmpty(runs, 4, '暂无每日财务运行记录');
   setMessage('reports-msg', '最近定时成功日期显示报表所覆盖的日期 / 周期，并非手动发送时间。');
   for (const kind of ['daily', 'weekly']) {
     const state = $(`${kind}-state`);
@@ -1533,7 +894,7 @@ async function loadReports() {
 /* ---------- 设置 ---------- */
 
 function buildField(spec) {
-  const wrap = el('div', 'field');
+  const wrap = el('div', BOOL_KEYS.has(spec.key) ? 'field boolean-field' : 'field');
   const label = el('label', '', spec.label);
   label.htmlFor = `f-${spec.key}`;
   wrap.appendChild(label);
@@ -1551,7 +912,7 @@ function buildField(spec) {
     input.type = 'checkbox';
   } else {
     input = el('input', '');
-    input.type = spec.type === 'time' ? 'time' : INT_KEYS.has(spec.key) || DECIMAL_KEYS.has(spec.key) ? 'number' : 'text';
+    input.type = INT_KEYS.has(spec.key) || DECIMAL_KEYS.has(spec.key) ? 'number' : SECRET_KEYS.has(spec.key) ? 'password' : 'text';
     if (DECIMAL_KEYS.has(spec.key)) {
       input.min = '0';
       input.step = 'any';
@@ -1565,12 +926,14 @@ function buildField(spec) {
     configRevision++;
     input.dataset.dirty = 'true';
     input.dataset.revision = String(configRevision);
+    updateDirtyIndicator();
   });
 
   if (BOOL_KEYS.has(spec.key)) {
     const rowEl = el('div', 'switch');
     rowEl.appendChild(input);
-    const caption = el('span', 'muted', spec.hint || '');
+    const caption = el('label', 'muted', spec.hint || '');
+    caption.htmlFor = input.id;
     rowEl.appendChild(caption);
     wrap.appendChild(rowEl);
   } else {
@@ -1584,10 +947,13 @@ function buildSettings() {
   const root = $('view-settings');
   root.textContent = '';
 
-  const grid = el('div', 'grid-2');
+  const intro = infoStrip('修改后请保存配置使其生效。连接测试使用已保存的数据源；测试发送与手动报表可使用当前填写的钉钉参数。');
+  intro.classList.add('settings-intro');
+  root.appendChild(intro);
+  const grid = el('div', 'grid-2 settings-connections');
 
   const dingtalk = el('div', 'card glass');
-  dingtalk.appendChild(el('h3', '', '钉钉推送'));
+  dingtalk.appendChild(sectionHeading('钉钉推送', '消息通道与机器人凭据', 'send', '01'));
   const dgGrid = el('div', 'grid');
   dgGrid.id = 'group-dingtalk';
   for (const spec of FIELDS['group-dingtalk']) dgGrid.appendChild(buildField(spec));
@@ -1602,7 +968,7 @@ function buildSettings() {
   grid.appendChild(dingtalk);
 
   const source = el('div', 'card glass');
-  source.appendChild(el('h3', '', 'new-api 数据源（只读）'));
+  source.appendChild(sectionHeading('new-api 数据源', '只读访问 · 数据库连接配置', 'database', '02'));
   const srcGrid = el('div', 'grid');
   srcGrid.id = 'group-source';
   for (const spec of FIELDS['group-source']) srcGrid.appendChild(buildField(spec));
@@ -1618,31 +984,33 @@ function buildSettings() {
   root.appendChild(grid);
 
   const push = el('div', 'card glass');
-  push.appendChild(el('h3', '', '推送控制'));
-  const pushGrid = el('div', 'grid');
-  pushGrid.id = 'group-push';
-  for (const spec of FIELDS['group-push']) pushGrid.appendChild(buildField(spec));
-  push.appendChild(pushGrid);
+  push.appendChild(sectionHeading('通知规则', '发送范围、金额门槛与自动统计', 'settings', '03'));
+  const pushGroups = [
+    ['运行与扫描', ['enabled', 'poll_interval', 'lookback_hours', 'backfill']],
+    ['订单范围与结果', ['scope_wallet', 'scope_subscription', 'push_success', 'push_failed', 'push_expired', 'expire_minutes']],
+    ['金额与自动报表', ['large_order_threshold', 'min_push_amount', 'daily_report', 'weekly_report']],
+  ];
+  for (const [title, keys] of pushGroups) {
+    const section = el('section', 'settings-subsection');
+    section.appendChild(el('h4', '', title));
+    const fields = el('div', 'grid');
+    for (const key of keys) fields.appendChild(buildField(FIELDS['group-push'].find((spec) => spec.key === key)));
+    section.appendChild(fields);
+    push.appendChild(section);
+  }
   root.appendChild(push);
 
-  const consume = el('div', 'card glass');
-  consume.appendChild(el('h3', '', '消耗统计通知'));
-  consume.appendChild(el('div', 'muted', '只读 new-api 消耗日志，保留间隔变动 / 阈值通知；独立站点比例计算收入，渠道比例计算成本，均为 CNY。缺比例仍展示网站额度，对应金额未知。保存最新比例后，可一键逐渠道初始化历史财务并查看进度，旧单价不再参与利润计算。'));
-  const consumeGrid = el('div', 'grid');
-  consumeGrid.id = 'group-consume';
-  for (const spec of FIELDS['group-consume']) consumeGrid.appendChild(buildField(spec));
-  consume.appendChild(consumeGrid);
-  root.appendChild(consume);
-
   const backfill = el('div', 'card glass');
-  backfill.appendChild(el('h3', '', '推送补发'));
+  backfill.appendChild(sectionHeading('推送补发', '手动回溯指定时间内的订单', 'refresh', '04'));
   backfill.appendChild(el('div', 'muted', '把最近 N 小时的订单再推一遍（不受「已推送」去重限制），消息标题会标注「补发推送」。'));
   const bfActions = el('div', 'actions');
-  bfActions.appendChild(el('label', 'muted', '回溯小时数'));
+  const bfLabel = el('label', 'muted', '回溯小时数');
+  bfLabel.htmlFor = 'bf-hours';
+  bfActions.appendChild(bfLabel);
   const bfHours = el('input', 'num', '');
   bfHours.type = 'number'; bfHours.value = '24'; bfHours.min = '1'; bfHours.max = '720'; bfHours.id = 'bf-hours';
   bfActions.appendChild(bfHours);
-  const bfBtn = el('button', 'btn', '补发推送');
+  const bfBtn = addButtonIcon(el('button', 'btn', '补发推送'), 'send');
   bfBtn.id = 'backfill';
   bfActions.appendChild(bfBtn);
   bfActions.appendChild(el('span', 'muted', ''));
@@ -1650,23 +1018,30 @@ function buildSettings() {
   backfill.appendChild(bfActions);
   root.appendChild(backfill);
 
-  const reportsLink = el('a', 'btn', '前往报表与推送：日 / 周报及推送历史');
+  const reportsLink = addButtonIcon(el('a', 'btn report-settings-link', '前往报表与推送：日 / 周报及推送历史'), 'reports');
   reportsLink.href = '#/reports';
   root.appendChild(reportsLink);
 
   const status = el('div', 'card glass');
-  status.appendChild(el('h3', '', '运行状态'));
+  status.appendChild(sectionHeading('运行状态', '最近扫描与通知发送概况', 'info', '05'));
   const statusbar = el('div', 'statusline');
   statusbar.id = 'statusbar';
   status.appendChild(statusbar);
   root.appendChild(status);
 
-  const saveBar = el('div', 'actions');
-  const saveBtn = el('button', 'btn primary', '保存配置');
+  const saveBar = el('div', 'settings-savebar glass');
+  saveBar.id = 'settings-savebar';
+  const saveCopy = el('div', 'save-copy');
+  const saveState = el('strong', '', '配置管理');
+  saveState.id = 'save-state';
+  saveState.setAttribute('aria-live', 'polite');
+  saveCopy.append(saveState, el('span', '', '保存后应用到后续扫描与推送'));
+  const saveBtn = addButtonIcon(el('button', 'btn primary', '保存配置'), 'shield');
   saveBtn.id = 'save';
-  saveBar.appendChild(saveBtn);
-  saveBar.appendChild(el('span', 'muted', ''));
-  saveBar.lastChild.id = 'save-msg';
+  const saveMessage = el('span', 'muted', '');
+  saveMessage.id = 'save-msg';
+  saveMessage.setAttribute('role', 'status');
+  saveBar.append(saveCopy, saveBtn, saveMessage);
   root.appendChild(saveBar);
 
   bindSettingsActions();
@@ -1698,6 +1073,7 @@ function fill(config, envOverridden, secrets, preserveDirty = false) {
       if (hint) hint.textContent = text;
     }
   }
+  updateDirtyIndicator();
 }
 
 function collect() {
@@ -1780,11 +1156,10 @@ function renderHistory(items) {
     const row = el('tr', '');
     if (item.detail) row.title = item.detail;
     row.appendChild(el('td', '', formatTime(item.pushed_at)));
-    badgeCell(row, STATUS_TEXT[item.status] || item.status, item.status);
+    badgeCell(row, STATUS_TEXT[item.status] || item.status, item.status === 'expired' ? 'timeout' : item.status);
     row.appendChild(el('td', '', item.trade_no));
     row.appendChild(el('td', '', item.username));
-    const moneyText = item.money_known === 0 ? '—（未知）' : fmtMoney(item.money, 'CNY');
-    row.appendChild(el('td', 'num', item.kind && item.kind.startsWith('consume_') ? moneyText : fmtYuan(item.money)));
+    row.appendChild(el('td', 'num', fmtYuan(item.money)));
     row.appendChild(el('td', '', item.reason || '-'));
     badgeCell(row, SOURCE_TEXT[item.reason_source] || item.reason_source || '-', 'source');
     const pushText = (item.ok ? '成功' : '失败') + (item.backfill ? ' · 补发推送' : '');
@@ -1846,7 +1221,6 @@ function bindBusyAction(id, messageId, action) {
     } finally {
       button.disabled = false;
       button.removeAttribute('aria-busy');
-      if (id === 'cf-backfill' && button.isConnected) updateBackfillButton();
     }
   });
 }
@@ -1854,7 +1228,6 @@ function bindBusyAction(id, messageId, action) {
 function bindSettingsActions() {
   bindBusyAction('save', 'save-msg', async () => {
     if (!configLoaded) return setMessage('save-msg', '配置尚未读取成功，请重新进入设置后再保存', 'bad');
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(inputs.consume_daily_report_time.value)) return setMessage('save-msg', '每日财务推送时间必须为 HH:MM', 'bad');
     for (const key of DECIMAL_KEYS) {
       const input = inputs[key];
       const value = Number(input.value);
@@ -1877,6 +1250,7 @@ function bindSettingsActions() {
           input.placeholder = MASK;
         }
       }
+      updateDirtyIndicator();
     }
     if (version !== pageVersion) return;
     if (status === 401) return showLogin();
@@ -1927,24 +1301,6 @@ function bindSettingsActions() {
 /* ---------- 启动 ---------- */
 
 function bind() {
-  for (const id of ['period-start', 'period-end']) {
-    $(id).addEventListener('input', () => {
-      $('period-end').setCustomValidity('');
-      setMessage('period-error', '');
-    });
-  }
-  $('period-form').addEventListener('submit', (event) => {
-    event.preventDefault();
-    const start = new Date($('period-start').value).getTime() / 1000;
-    const end = new Date($('period-end').value).getTime() / 1000;
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
-      $('period-end').setCustomValidity('结束时间必须晚于开始时间');
-      $('period-end').reportValidity();
-      return setMessage('period-error', '结束时间必须晚于开始时间', 'bad');
-    }
-    applyPeriod(start, end, true);
-    renderCurrent();
-  });
   $('login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     setMessage('login-error', '');
@@ -1976,6 +1332,9 @@ async function boot() {
   renderCurrent();
 }
 
+for (const node of document.querySelectorAll('[data-icon]')) {
+  node.replaceChildren(icon(node.dataset.icon));
+}
 initTheme();
 bind();
 boot();

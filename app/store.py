@@ -29,9 +29,8 @@ CREATE TABLE IF NOT EXISTS push_history (
     reason        TEXT NOT NULL,
     reason_source TEXT NOT NULL,
     ok            INTEGER NOT NULL,
-    backfill       INTEGER NOT NULL DEFAULT 0,
-    detail        TEXT NOT NULL,
-    money_known    INTEGER NOT NULL DEFAULT 1
+    backfill      INTEGER NOT NULL DEFAULT 0,
+    detail        TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS admin_credential (
     id            INTEGER PRIMARY KEY CHECK (id = 1),
@@ -40,85 +39,6 @@ CREATE TABLE IF NOT EXISTS admin_credential (
 CREATE TABLE IF NOT EXISTS runtime_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS exchange_rates (
-    currency   TEXT PRIMARY KEY,
-    rate       TEXT NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS exchange_rate_history (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    currency   TEXT NOT NULL,
-    old_rate   TEXT NOT NULL,
-    new_rate   TEXT NOT NULL,
-    changed_at INTEGER NOT NULL,
-    note       TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS channel_finance (
-    channel_id INTEGER PRIMARY KEY,
-    channel_name TEXT NOT NULL,
-    fee_currency TEXT NOT NULL,
-    fee_rate TEXT NOT NULL,
-    cost_currency TEXT NOT NULL,
-    cost_per_quota TEXT,
-    updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS channel_finance_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_id INTEGER NOT NULL,
-    channel_name TEXT NOT NULL,
-    fee_currency TEXT NOT NULL,
-    fee_rate TEXT NOT NULL,
-    cost_currency TEXT NOT NULL,
-    cost_per_quota TEXT,
-    effective_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    deleted INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS channel_finance_time
-    ON channel_finance_history(channel_id, effective_at, id);
-CREATE TABLE IF NOT EXISTS channel_finance_backfill (
-    channel_id INTEGER PRIMARY KEY,
-    snapshot_id INTEGER NOT NULL,
-    start_ts INTEGER NOT NULL,
-    end_ts INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS site_rate_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rate TEXT NOT NULL,
-    effective_at INTEGER NOT NULL,
-    note TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS finance_overrides (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    channel_id INTEGER NOT NULL,
-    channel_snapshot_id INTEGER NOT NULL,
-    site_snapshot_id INTEGER NOT NULL,
-    channel_rate TEXT NOT NULL,
-    site_rate TEXT NOT NULL,
-    start_ts INTEGER NOT NULL,
-    end_ts INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    preview_token TEXT NOT NULL UNIQUE
-);
-CREATE TABLE IF NOT EXISTS finance_previews (
-    token TEXT PRIMARY KEY,
-    payload TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS daily_report_runs (
-    day TEXT PRIMARY KEY,
-    status TEXT NOT NULL,
-    started_at INTEGER NOT NULL,
-    finished_at INTEGER,
-    detail TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS channel_costs (
-    channel_id    INTEGER PRIMARY KEY,
-    cost_per_unit TEXT NOT NULL,
-    currency      TEXT NOT NULL DEFAULT 'CNY',
-    updated_at    INTEGER NOT NULL
 );
 """
 
@@ -143,17 +63,7 @@ class Store:
         if "backfill" not in columns:
             self._conn.execute(
                 "ALTER TABLE push_history ADD COLUMN backfill INTEGER NOT NULL DEFAULT 0")
-        if "money_known" not in columns:
-            self._conn.execute(
-                "ALTER TABLE push_history ADD COLUMN money_known INTEGER NOT NULL DEFAULT 1")
-        self._conn.commit()
-
-        self._conn.execute(
-            "INSERT INTO exchange_rate_history (currency, old_rate, new_rate, changed_at, note) "
-            "SELECT currency, '0', rate, updated_at, 'migration' FROM exchange_rates r "
-            "WHERE NOT EXISTS (SELECT 1 FROM exchange_rate_history h "
-            "WHERE h.currency = r.currency)")
-        self._conn.commit()
+            self._conn.commit()
 
     def _write(self, sql, args=()):
         with self._lock:
@@ -209,7 +119,7 @@ class Store:
         self._write(
             "INSERT INTO push_history "
             "(pushed_at, kind, trade_no, status, username, money, reason, reason_source, ok, "
-            "backfill, detail, money_known) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "backfill, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 int(record.get("pushed_at") or time.time()),
                 record["kind"], record["trade_no"], record["status"],
@@ -217,7 +127,6 @@ class Store:
                 record.get("reason", ""), record.get("reason_source", ""),
                 1 if record.get("ok") else 0, 1 if record.get("backfill") else 0,
                 record.get("detail", ""),
-                1 if record.get("money_known", record.get("money") is not None) else 0,
             ),
         )
         self._write(
@@ -259,284 +168,3 @@ class Store:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, str(value)),
         )
-
-    # ---------- 汇率 ----------
-
-    def exchange_rates(self):
-        return [dict(row) for row in self._read(
-            "SELECT currency, rate, updated_at FROM exchange_rates ORDER BY currency")]
-
-    def get_exchange_rate(self, currency):
-        rows = self._read(
-            "SELECT rate FROM exchange_rates WHERE currency = ?", (currency,))
-        return rows[0]["rate"] if rows else ""
-
-    def set_exchange_rate(self, currency, rate):
-        """写入当前汇率，返回旧值（无旧值返回空串）。rate 为 decimal 字符串。"""
-        return self.save_exchange_rate(currency, rate)
-
-    def save_exchange_rate(self, currency, rate, note=""):
-        with self._lock, self._conn:
-            old = self.get_exchange_rate(currency)
-            now = int(time.time())
-            self._conn.execute(
-                "INSERT INTO exchange_rate_history "
-                "(currency, old_rate, new_rate, changed_at, note) VALUES (?, ?, ?, ?, ?)",
-                (currency, old or "0", str(rate), now, note or ""))
-            self._conn.execute(
-                "INSERT INTO exchange_rates (currency, rate, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(currency) DO UPDATE SET rate = excluded.rate, "
-                "updated_at = excluded.updated_at", (currency, str(rate), now))
-            return old
-
-    def find_exchange_rate(self, currency, ts):
-        rows = self._read(
-            "SELECT new_rate AS rate FROM exchange_rate_history "
-            "WHERE currency = ? AND changed_at <= ? ORDER BY changed_at DESC, id DESC LIMIT 1",
-            (currency, int(ts)))
-        if rows:
-            return rows[0]["rate"]
-        rows = self._read(
-            "SELECT rate FROM exchange_rates WHERE currency = ? AND updated_at <= ?",
-            (currency, int(ts)))
-        return rows[0]["rate"] if rows else ""
-
-    def add_rate_history(self, currency, old_rate, new_rate, note=""):
-        self._write(
-            "INSERT INTO exchange_rate_history "
-            "(currency, old_rate, new_rate, changed_at, note) VALUES (?, ?, ?, ?, ?)",
-            (currency, str(old_rate), str(new_rate), int(time.time()), note or ""),
-        )
-
-    def rate_history(self, currency=None, limit=200):
-        if currency:
-            rows = self._read(
-                "SELECT * FROM exchange_rate_history WHERE currency = ? "
-                "ORDER BY id DESC LIMIT ?",
-                (currency, int(limit)),
-            )
-        else:
-            rows = self._read(
-                "SELECT * FROM exchange_rate_history ORDER BY id DESC LIMIT ?",
-                (int(limit),),
-            )
-        return [dict(row) for row in rows]
-
-    # ---------- 渠道成本单价 ----------
-
-    def channel_costs(self):
-        return [dict(row) for row in self._read(
-            "SELECT channel_id, cost_per_unit, currency, updated_at "
-            "FROM channel_costs ORDER BY channel_id")]
-
-    def get_channel_cost(self, channel_id):
-        rows = self._read(
-            "SELECT * FROM channel_costs WHERE channel_id = ?", (int(channel_id),))
-        return dict(rows[0]) if rows else None
-
-    def set_channel_cost(self, channel_id, cost_per_unit, currency="CNY"):
-        self._write(
-            "INSERT INTO channel_costs (channel_id, cost_per_unit, currency, updated_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(channel_id) DO UPDATE SET cost_per_unit = excluded.cost_per_unit, "
-            "currency = excluded.currency, updated_at = excluded.updated_at",
-            (int(channel_id), str(cost_per_unit), currency or "CNY", int(time.time())),
-        )
-
-    def delete_channel_cost(self, channel_id):
-        self._write("DELETE FROM channel_costs WHERE channel_id = ?", (int(channel_id),))
-
-    def upsert_channel_finance(self, channel_id, channel_name, fee_currency, fee_rate,
-                               cost_currency, cost_per_quota, effective_at=None):
-        from rates import normalize_currency, parse_rate, parse_cost
-        if isinstance(channel_id, bool) or not str(channel_id).isdigit() or int(channel_id) <= 0:
-            raise ValueError("channel_id 必须是正整数")
-        cid = int(channel_id)
-        values = (cid, str(channel_name or "").strip(), normalize_currency(fee_currency),
-                  str(parse_rate(fee_rate)), normalize_currency(cost_currency),
-                  None if cost_per_quota is None else str(parse_cost(cost_per_quota)))
-        now = int(time.time())
-        effective = now if effective_at is None else int(effective_at)
-        with self._lock, self._conn:
-            self._check_channel_time(cid, effective)
-            self._conn.execute(
-                "INSERT INTO channel_finance_history (channel_id, channel_name, fee_currency, "
-                "fee_rate, cost_currency, cost_per_quota, effective_at, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (*values, effective, now))
-            self._conn.execute(
-                "INSERT INTO channel_finance VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(channel_id) DO UPDATE SET channel_name=excluded.channel_name, "
-                "fee_currency=excluded.fee_currency, fee_rate=excluded.fee_rate, "
-                "cost_currency=excluded.cost_currency, cost_per_quota=excluded.cost_per_quota, "
-                "updated_at=excluded.updated_at", (*values, effective))
-        return dict(zip(("channel_id", "channel_name", "fee_currency", "fee_rate",
-                         "cost_currency", "cost_per_quota", "updated_at"), (*values, effective)))
-
-    def _check_channel_time(self, channel_id, effective):
-        rows = self._conn.execute(
-            "SELECT MAX(effective_at) FROM channel_finance_history WHERE channel_id = ?",
-            (channel_id,)).fetchone()
-        if effective < 0 or (rows[0] is not None and effective < rows[0]):
-            raise ValueError("生效时间不能早于已有历史")
-
-    def delete_channel_finance(self, channel_id, effective_at=None):
-        if isinstance(channel_id, bool) or not str(channel_id).isdigit() or int(channel_id) <= 0:
-            raise ValueError("channel_id 必须是正整数")
-        cid = int(channel_id)
-        now = int(time.time())
-        effective = now if effective_at is None else int(effective_at)
-        with self._lock, self._conn:
-            self._check_channel_time(cid, effective)
-            self._conn.execute(
-                "INSERT INTO channel_finance_history (channel_id, channel_name, fee_currency, "
-                "fee_rate, cost_currency, cost_per_quota, effective_at, created_at, deleted) "
-                "VALUES (?, '', '', '', '', NULL, ?, ?, 1)", (cid, effective, now))
-            self._conn.execute("DELETE FROM channel_finance WHERE channel_id = ?", (cid,))
-
-    def list_channel_finance(self):
-        return [dict(row) for row in self._read("SELECT * FROM channel_finance ORDER BY channel_id")]
-
-    def list_channel_finance_history(self, channel_id=None, limit=200):
-        where = " WHERE channel_id = ?" if channel_id is not None else ""
-        args = (int(channel_id), int(limit)) if channel_id is not None else (int(limit),)
-        return [dict(row) for row in self._read(
-            "SELECT * FROM channel_finance_history" + where +
-            " ORDER BY effective_at DESC, id DESC LIMIT ?", args)]
-
-    def find_channel_snapshot(self, channel_id, ts):
-        rows = self._read(
-            "SELECT * FROM channel_finance_history WHERE channel_id = ? AND effective_at <= ? "
-            "ORDER BY effective_at DESC, id DESC LIMIT 1", (int(channel_id), int(ts)))
-        if rows:
-            return dict(rows[0]) if not rows[0]["deleted"] else None
-        rows = self._read(
-            "SELECT h.* FROM channel_finance_backfill b "
-            "JOIN channel_finance_history h ON h.id = b.snapshot_id "
-            "WHERE b.channel_id = ? AND b.start_ts <= ? AND b.end_ts > ?",
-            (int(channel_id), int(ts), int(ts)))
-        return dict(rows[0]) if rows else None
-
-    def first_channel_snapshot(self, channel_id):
-        rows = self._read(
-            "SELECT * FROM channel_finance_history WHERE channel_id = ? "
-            "ORDER BY effective_at, id LIMIT 1", (int(channel_id),))
-        return dict(rows[0]) if rows else None
-
-    def channel_backfill(self, channel_id):
-        rows = self._read("SELECT * FROM channel_finance_backfill WHERE channel_id = ?",
-                          (int(channel_id),))
-        return dict(rows[0]) if rows else None
-
-    def save_channel_backfill(self, channel_id, snapshot_id, start, end):
-        with self._lock, self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
-            if self.channel_backfill(channel_id):
-                return False
-            snapshot = self.first_channel_snapshot(channel_id)
-            if (not snapshot or snapshot["deleted"] or snapshot["id"] != snapshot_id
-                    or snapshot["effective_at"] != end or not 0 < start < end):
-                raise ValueError("首次快照已变化，请重新预览")
-            self._conn.execute(
-                "INSERT INTO channel_finance_backfill VALUES (?, ?, ?, ?, ?)",
-                (int(channel_id), snapshot_id, int(start), int(end), int(time.time())))
-        return True
-
-    def has_channel_finance_history(self, channel_id, ts):
-        return bool(self._read(
-            "SELECT 1 FROM channel_finance_history WHERE channel_id = ? "
-            "AND effective_at <= ? LIMIT 1", (int(channel_id), int(ts))))
-
-    def save_site_rate(self, rate, note="", effective_at=None):
-        from rates import parse_rate
-        rate = str(parse_rate(rate))
-        effective = int(time.time()) if effective_at is None else int(effective_at)
-        with self._lock, self._conn:
-            current = self.find_site_rate()
-            if effective < 0 or (current and effective < current["effective_at"]):
-                raise ValueError("生效时间不能早于已有历史")
-            cursor = self._conn.execute(
-                "INSERT INTO site_rate_history (rate, effective_at, note) VALUES (?, ?, ?)",
-                (rate, effective, str(note or "")))
-            return cursor.lastrowid
-
-    def find_site_rate(self, ts=None):
-        rows = self._read(
-            "SELECT * FROM site_rate_history WHERE effective_at <= ? "
-            "ORDER BY effective_at DESC, id DESC LIMIT 1",
-            (int(time.time()) if ts is None else int(ts),))
-        return dict(rows[0]) if rows else None
-
-    def site_rate_history(self):
-        return [dict(row) for row in self._read(
-            "SELECT * FROM site_rate_history ORDER BY effective_at DESC, id DESC")]
-
-    def current_channel_snapshot(self, channel_id):
-        rows = self._read(
-            "SELECT * FROM channel_finance_history WHERE channel_id = ? "
-            "ORDER BY effective_at DESC, id DESC LIMIT 1", (int(channel_id),))
-        return dict(rows[0]) if rows and not rows[0]["deleted"] else None
-
-    def finance_override(self, channel_id, ts):
-        rows = self._read(
-            "SELECT * FROM finance_overrides WHERE channel_id = ? AND start_ts <= ? "
-            "AND end_ts > ? ORDER BY id DESC LIMIT 1", (int(channel_id), int(ts), int(ts)))
-        return dict(rows[0]) if rows else None
-
-    def finance_overrides(self, channel_id=None):
-        where = " WHERE channel_id = ?" if channel_id is not None else ""
-        return [dict(row) for row in self._read(
-            "SELECT * FROM finance_overrides" + where + " ORDER BY id DESC",
-            (int(channel_id),) if channel_id is not None else ())]
-
-    def finance_initialization_snapshot(self, end):
-        with self._lock:
-            site = self.find_site_rate(end)
-            channels = [(item, self.current_channel_snapshot(item["channel_id"]))
-                        for item in self.list_channel_finance()]
-            return site, channels
-
-    def save_finance_preview(self, payload):
-        import secrets
-        token = secrets.token_urlsafe(32)
-        self._write("INSERT INTO finance_previews VALUES (?, ?, ?)",
-                    (token, json.dumps(payload), int(time.time())))
-        return token
-
-    def confirm_finance_preview(self, token, channel_id):
-        with self._lock, self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
-            rows = self._conn.execute(
-                "SELECT * FROM finance_previews WHERE token = ?", (str(token),)).fetchall()
-            if not rows or int(time.time()) - rows[0]["created_at"] > 600:
-                raise ValueError("预览不存在或已过期，请重新预览")
-            payload = json.loads(rows[0]["payload"])
-            channel = self.current_channel_snapshot(channel_id)
-            site = self.find_site_rate()
-            if (payload["channel_id"] != channel_id or not channel or not site
-                    or payload["channel_snapshot_id"] != channel["id"]
-                    or payload["site_snapshot_id"] != site["id"]):
-                raise ValueError("比例已变化，请重新预览")
-            self._conn.execute(
-                "INSERT INTO finance_overrides (channel_id, channel_snapshot_id, "
-                "site_snapshot_id, channel_rate, site_rate, start_ts, end_ts, created_at, "
-                "preview_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (channel_id, channel["id"], site["id"], payload["channel_rate"],
-                 payload["site_rate"], payload["start"], payload["end"], int(time.time()), token))
-            self._conn.execute("DELETE FROM finance_previews WHERE token = ?", (token,))
-            return payload
-
-    def claim_daily_report(self, day):
-        cursor = self._write(
-            "INSERT OR IGNORE INTO daily_report_runs (day, status, started_at) "
-            "VALUES (?, 'sending', ?)", (str(day), int(time.time())))
-        return cursor.rowcount == 1
-
-    def finish_daily_report(self, day, ok, detail):
-        self._write(
-            "UPDATE daily_report_runs SET status = ?, finished_at = ?, detail = ? "
-            "WHERE day = ? AND status = 'sending'",
-            ("success" if ok else "failed", int(time.time()), str(detail or ""), str(day)))
-
-    def daily_report_runs(self, limit=30):
-        return [dict(row) for row in self._read(
-            "SELECT * FROM daily_report_runs ORDER BY day DESC LIMIT ?", (int(limit),))]

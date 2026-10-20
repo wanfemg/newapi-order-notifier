@@ -15,6 +15,13 @@ import urllib.parse
 
 TERMINAL_STATUSES = ("success", "failed", "expired")
 
+# 订阅会在 top_ups 写同交易号的记账镜像；订阅记录权威，不受查询窗口或状态限制。
+WALLET_NOT_SUBSCRIPTION_SQL = (
+    "NOT EXISTS (SELECT 1 FROM subscription_orders AS subscription_mirror "
+    "WHERE subscription_mirror.trade_no = top_ups.trade_no "
+    "AND subscription_mirror.trade_no <> '')"
+)
+
 
 class SourceError(Exception):
     pass
@@ -164,7 +171,8 @@ class SourceDB:
             "SELECT 'wallet' AS kind, id, user_id, money, amount, trade_no, "
             "payment_method, payment_provider, status, create_time, complete_time, "
             "0 AS plan_id, '' AS provider_payload FROM top_ups "
-            f"WHERE create_time >= {p} AND (status IN ({statuses}){pending_clause})"
+            f"WHERE create_time >= {p} AND (status IN ({statuses}){pending_clause}) "
+            f"AND {WALLET_NOT_SUBSCRIPTION_SQL}"
         )
         subscription = (
             "SELECT 'subscription' AS kind, id, user_id, money, 0 AS amount, trade_no, "
@@ -192,7 +200,10 @@ class SourceDB:
         失败 / 过期 / 待支付的订单不计入。
         """
         p = self.placeholder
-        wallet = "SELECT user_id, money, status, create_time FROM top_ups"
+        wallet = (
+            "SELECT user_id, money, status, create_time FROM top_ups "
+            f"WHERE {WALLET_NOT_SUBSCRIPTION_SQL}"
+        )
         subscription = "SELECT user_id, money, status, create_time FROM subscription_orders"
         return self._fetch(
             f"SELECT user_id, SUM(money) AS money, COUNT(*) AS orders FROM "
@@ -208,7 +219,8 @@ class SourceDB:
         wallet = (
             "SELECT 'wallet' AS kind, user_id, money, payment_method, payment_provider, "
             "create_time, trade_no FROM top_ups "
-            f"WHERE status = {p} AND create_time >= {p} AND create_time < {p}"
+            f"WHERE status = {p} AND create_time >= {p} AND create_time < {p} "
+            f"AND {WALLET_NOT_SUBSCRIPTION_SQL}"
         )
         subscription = (
             "SELECT 'subscription' AS kind, user_id, money, payment_method, "
@@ -250,7 +262,8 @@ class SourceDB:
             "SELECT 'wallet' AS kind, id, user_id, money, amount, trade_no, "
             "payment_method, payment_provider, status, create_time, complete_time, "
             "0 AS plan_id, '' AS provider_payload FROM top_ups "
-            f"WHERE create_time >= {p} AND create_time < {p}"
+            f"WHERE create_time >= {p} AND create_time < {p} "
+            f"AND {WALLET_NOT_SUBSCRIPTION_SQL}"
         )
         subscription = (
             "SELECT 'subscription' AS kind, id, user_id, money, 0 AS amount, trade_no, "
@@ -294,53 +307,3 @@ class SourceDB:
         except Exception:
             return {}  # 老版本库可能还没有 subscription_plans 表
         return {int(row["id"]): (row.get("title") or "") for row in rows}
-
-    def channels(self):
-        """只读渠道列表（id/name/type/models/status），供渠道成本比例配置用。"""
-        conn = self._connect()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM channels WHERE 1 = 0")
-            columns = {column[0] for column in cursor.description}
-            if "id" not in columns:
-                raise SourceError("channels 表缺少 id 字段")
-            defaults = {"id": "0", "name": "''", "type": "0",
-                        "models": "''", "status": "0"}
-            fields = [name if name in columns else f"{default} AS {name}"
-                      for name, default in defaults.items()]
-            cursor.execute("SELECT " + ", ".join(fields) + " FROM channels ORDER BY id")
-            return [dict(zip(defaults, row)) for row in cursor.fetchall()]
-        finally:
-            conn.close()
-
-    def first_channel_consumption(self, channel_id, end_ts):
-        p = self.placeholder
-        rows = self._fetch(
-            f"SELECT MIN(created_at) AS first_at FROM logs WHERE type = {p} "
-            f"AND channel_id = {p} AND quota > 0 AND created_at > 0 AND created_at < {p}",
-            (2, int(channel_id), int(end_ts)))
-        return rows[0]["first_at"]
-
-    def channel_consumption_summary(self, channel_id, end_ts):
-        """只读汇总指定渠道的历史消耗，避免拉取全站逐秒明细。"""
-        p = self.placeholder
-        rows = self._fetch(
-            f"SELECT MIN(created_at) AS first_at, SUM(quota) AS quota "
-            f"FROM logs WHERE type = {p} AND channel_id = {p} "
-            f"AND quota > 0 AND created_at >= {p} AND created_at < {p}",
-            (2, int(channel_id), 0, int(end_ts)))
-        return rows[0]
-
-    def consumption(self, start_ts, end_ts):
-        """窗口内消耗日志按 (user_id, channel_id, created_at) 汇总 quota 与条数。
-
-        new-api 的 logs 表 type=2 为消耗日志，quota 为消耗额度（整数）。
-        只读聚合，不返回原始明细。
-        """
-        p = self.placeholder
-        return self._fetch(
-            f"SELECT user_id, channel_id, created_at, SUM(quota) AS quota, COUNT(*) AS cnt "
-            f"FROM logs WHERE type = {p} AND created_at >= {p} AND created_at < {p} "
-            "GROUP BY user_id, channel_id, created_at ORDER BY created_at, user_id, channel_id",
-            (2, int(start_ts), int(end_ts)),
-        )
